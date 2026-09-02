@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/aperturerobotics/fastjson v0.1.1
 	github.com/aperturerobotics/util v1.34.9
-	github.com/paralin/s2replay v0.0.0-20260902025710-672f0457efb6
+	github.com/paralin/s2replay v0.0.0-20260902194211-e3187b7bb0a3
 	github.com/pkg/errors v0.9.1
 )
 
