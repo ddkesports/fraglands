@@ -71,6 +71,7 @@ func (w *Web) handlePreparation(rw http.ResponseWriter, r *http.Request, p *prin
 		data["RevisionID"] = rev.ID
 		data["Fidelity"] = rev.Fidelity.String()
 		data["Omissions"] = rev.Omissions
+		data["LeadInStartTick"] = rev.LeadInStartTick
 	}
 	if failure := status.Preparation.Failure(); failure != nil {
 		data["Failure"] = failure
@@ -97,13 +98,88 @@ func (w *Web) handlePreparation(rw http.ResponseWriter, r *http.Request, p *prin
 	if status.AllocationFailure != nil {
 		data["AllocFailure"] = status.AllocationFailure.Reason
 	}
+	// Only the preparation owner sees the invite form.
+	data["CanInvite"] = w.orch.IsOwner(p.account, r.PathValue("id"))
 
 	w.render(rw, http.StatusOK, "preparation.html", data)
 }
 
-// handleClaim reserves the principal's slot in the preparation lobby.
+// handleInvite issues an opaque single-use invitation for one account to
+// claim into this preparation's lobby. Only the owner may invite; the token
+// is shown once to the owner to pass to the invitee out of band.
+func (w *Web) handleInvite(rw http.ResponseWriter, r *http.Request, p *principal) {
+	if err := r.ParseForm(); err != nil {
+		w.renderError(rw, http.StatusBadRequest, "The form could not be read.")
+		return
+	}
+	accountID := r.PostFormValue("account_id")
+	if accountID == "" {
+		w.renderError(rw, http.StatusBadRequest, "Enter the account to invite.")
+		return
+	}
+	invite, err := w.orch.Invite(p.account, r.PathValue("id"), accountID)
+	if err != nil {
+		w.renderOrchError(rw, err)
+		return
+	}
+
+	// Re-render the preparation page with the token shown once.
+	status, err := w.orch.Preparation(p.account, r.PathValue("id"))
+	if err != nil {
+		w.renderOrchError(rw, err)
+		return
+	}
+	data := map[string]any{
+		"Account":     p.account.DisplayName,
+		"ID":          status.Preparation.ID,
+		"Replay":      status.Preparation.ReplayID,
+		"State":       status.Preparation.State().String(),
+		"Tick":        status.Preparation.TakeoverTick,
+		"CSRFToken":   w.csrfTokenFor(p.sessionID),
+		"CanInvite":   true,
+		"InviteToken": invite.Token,
+		"InviteFor":   accountID,
+	}
+	if rev := status.Preparation.Revision(); rev != nil {
+		data["RevisionID"] = rev.ID
+		data["Fidelity"] = rev.Fidelity.String()
+		data["Omissions"] = rev.Omissions
+		data["LeadInStartTick"] = rev.LeadInStartTick
+	}
+	if failure := status.Preparation.Failure(); failure != nil {
+		data["Failure"] = failure
+	}
+	if status.Lobby != nil {
+		lobby := map[string]any{
+			"Capacity": status.Lobby.Capacity,
+			"Occupied": status.Lobby.Occupied(),
+		}
+		if slot, ok := status.Lobby.Slot(p.account.ID); ok {
+			lobby["MySlot"] = slot
+			lobby["HasSlot"] = true
+		}
+		data["Lobby"] = lobby
+	}
+	if status.Process != nil {
+		data["Process"] = map[string]any{
+			"Generation": status.Process.Generation,
+			"Address":    status.Process.ConnectAddress,
+			"Ready":      status.Process.Ready(),
+			"Evidence":   status.Process.Evidence(),
+		}
+	}
+	if status.AllocationFailure != nil {
+		data["AllocFailure"] = status.AllocationFailure.Reason
+	}
+	w.render(rw, http.StatusOK, "preparation.html", data)
+}
+
+// handleClaim reserves the principal's slot in the preparation lobby. A
+// presented invite token authorizes a non-owner to claim; the token is
+// single-use and bound to the principal's account.
 func (w *Web) handleClaim(rw http.ResponseWriter, r *http.Request, p *principal) {
-	_, err := w.orch.Claim(p.account, r.PathValue("id"))
+	_ = r.ParseForm()
+	_, err := w.orch.ClaimAuthorized(p.account, r.PathValue("id"), r.PostFormValue("invite_token"))
 	if err != nil {
 		w.renderOrchError(rw, err)
 		return

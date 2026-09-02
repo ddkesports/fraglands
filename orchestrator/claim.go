@@ -182,3 +182,16 @@ func (o *Orchestrator) ClaimAuthorized(principal *core.Account, prepID, token st
 	}
 	return lobby.Claim(principal.ID)
 }
+
+// IsOwner reports whether the principal owns the preparation. The web
+// surface uses this to expose owner-only actions such as inviting.
+func (o *Orchestrator) IsOwner(principal *core.Account, prepID string) bool {
+	if principal == nil {
+		return false
+	}
+	var owner bool
+	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
+		owner = o.owners[prepID] == principal.ID
+	})
+	return owner
+}

@@ -22,6 +22,7 @@ button{padding:.45rem 1rem;cursor:pointer}
 <h1>Preparation {{.ID}}</h1>
 <dl>
 <dt>Replay</dt><dd>{{.Replay}}</dd>
+{{if .LeadInStartTick}}<dt>Lead-in start</dt><dd>{{.LeadInStartTick}}</dd>{{end}}
 <dt>Takeover tick</dt><dd>{{.Tick}}</dd>
 <dt>State</dt><dd>{{.State}}</dd>
 {{if .RevisionID}}<dt>Revision</dt><dd>{{.RevisionID}}</dd>{{end}}
@@ -55,6 +56,16 @@ button{padding:.45rem 1rem;cursor:pointer}
 </div>
 {{end}}
 
+{{if .CanInvite}}
+<div class="invite">
+<h3>Invite a teammate</h3>
+<form method="post" action="/preparations/{{.ID}}/invite">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<input type="text" name="account_id" placeholder="Account ID" required>
+<button type="submit">Invite</button>
+</form>
+</div>
+{{end}}
 <div class="actions">
 {{if .Lobby}}
 {{if .Lobby.HasSlot}}

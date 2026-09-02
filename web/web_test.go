@@ -72,6 +72,15 @@ func (f *fakeIdentityAuthority) Authenticate(ctx context.Context, credential str
 	return acct, nil
 }
 
+// fakeServerAuthority refuses every server credential: the web console tests
+// do not exercise server-participant flows.
+type fakeServerAuthority struct{}
+
+// AuthenticateServer refuses with an authentication error.
+func (f *fakeServerAuthority) AuthenticateServer(ctx context.Context, credential string) (*orchestrator.ServerParticipant, error) {
+	return nil, orchestrator.ErrUnauthenticated
+}
+
 var (
 	ownerAccount = &core.Account{ID: "acct-a", SteamID: 76561198000000001, DisplayName: "Owner"}
 	otherAcct    = &core.Account{ID: "acct-b", SteamID: 76561198000000002, DisplayName: "Other"}
@@ -95,7 +104,7 @@ func newTestWeb(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator, *We
 			"cred-a": ownerAccount,
 			"cred-b": otherAcct,
 		},
-	})
+	}, &fakeServerAuthority{})
 	console, err := NewWeb(orch)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -336,6 +345,19 @@ func TestPreparationHonestPreview(t *testing.T) {
 
 	body := waitReady(t, server, "cred-a", prepID)
 
+	// Honest lead-in: the takeover tick and the lead-in start tick are
+	// shown separately, and the lead-in start is strictly before the
+	// takeover tick, never a zero-length window.
+	if !strings.Contains(body, "Lead-in start") {
+		t.Fatal("expected the lead-in start tick to be shown")
+	}
+	if !strings.Contains(body, "63280") {
+		t.Fatal("expected the selected takeover tick")
+	}
+	if strings.Contains(body, "Lead-in start: 63280") {
+		t.Fatal("lead-in start must differ from the takeover tick")
+	}
+
 	// Honest preview: the badge and the typed omission are both shown.
 	if !strings.Contains(body, "Reconstruction Preview") {
 		t.Fatal("expected the Reconstruction Preview badge on a preview revision")
@@ -414,18 +436,28 @@ func TestDebriefSideBySide(t *testing.T) {
 		t.Fatalf("expected 303 for claim, got %d", resp.StatusCode)
 	}
 
-	// The server participant accepts one private result for the attempt on
-	// the same orchestrator, as in production.
+	// The server participant consumes the join intent (admitting the
+	// account on generation 1), then accepts the result, as in production.
+	// The participant is bound to process generation 1, the fake allocator's
+	// generation.
+	participant := &orchestrator.ServerParticipant{ID: "srv-a", ProcessGeneration: 1}
+	target, err := orch.IssueJoinIntent(ownerAccount, prepID)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if err := orch.ConsumeJoinIntent(participant, target.Intent.ID, target.Intent.RevisionID, ownerAccount.SteamID); err != nil {
+		t.Fatal(err.Error())
+	}
 	result := &core.AttemptResult{
 		ID:                "res-1",
 		AccountID:         ownerAccount.ID,
-		RevisionID:        "rev-" + prepID,
+		RevisionID:        target.Intent.RevisionID,
 		ProcessGeneration: 1,
 		AttemptGeneration: 7,
 		ReplayID:          "replay-1",
 		TakeoverTick:      63280,
 	}
-	if err := orch.AcceptResult(result); err != nil {
+	if err := orch.AcceptResult(participant, result); err != nil {
 		t.Fatal(err.Error())
 	}
 
@@ -460,11 +492,28 @@ func TestDebriefPrivacy(t *testing.T) {
 	login(t, server, "cred-a")
 	login(t, server, "cred-b")
 
-	// The owner's result exists.
-	if err := orch.AcceptResult(&core.AttemptResult{
+	// The owner prepares so the join intent can be issued and consumed,
+	// admitting the owner account on generation 1; then the participant
+	// accepts the result, as in production.
+	resp := postForm(t, server, "/preparations", "cred-a", url.Values{
+		"replay_id": {"replay-1"}, "takeover_tick": {"63280"},
+	})
+	prepID := strings.TrimPrefix(resp.Header.Get("Location"), "/preparations/")
+	waitReady(t, server, "cred-a", prepID)
+	postForm(t, server, "/preparations/"+prepID+"/slots", "cred-a", nil)
+
+	participant := &orchestrator.ServerParticipant{ID: "srv-a", ProcessGeneration: 1}
+	target, err := orch.IssueJoinIntent(ownerAccount, prepID)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if err := orch.ConsumeJoinIntent(participant, target.Intent.ID, target.Intent.RevisionID, ownerAccount.SteamID); err != nil {
+		t.Fatal(err.Error())
+	}
+	if err := orch.AcceptResult(participant, &core.AttemptResult{
 		ID:                "res-1",
 		AccountID:         ownerAccount.ID,
-		RevisionID:        "rev-1",
+		RevisionID:        target.Intent.RevisionID,
 		ProcessGeneration: 1,
 		AttemptGeneration: 7,
 		ReplayID:          "replay-1",

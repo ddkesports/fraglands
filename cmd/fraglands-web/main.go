@@ -46,6 +46,15 @@ func (n *noopPreparer) Prepare(ctx context.Context, prep *core.ScenarioPreparati
 // errAllocatorUnwired is the typed refusal of the development allocator.
 var errAllocatorUnwired = errors.New("no worker allocator wired into this binary")
 
+// noopServerAuthority refuses every server credential: the development binary
+// does not accept server-participant connections.
+type noopServerAuthority struct{}
+
+// AuthenticateServer refuses with an authentication error.
+func (n *noopServerAuthority) AuthenticateServer(ctx context.Context, credential string) (*orchestrator.ServerParticipant, error) {
+	return nil, orchestrator.ErrUnauthenticated
+}
+
 // noopAllocator refuses every allocation for the same reason.
 type noopAllocator struct{}
 
@@ -65,7 +74,7 @@ func main() {
 
 	orch := orchestrator.NewOrchestrator(ctx, nil, &noopPreparer{}, &noopAllocator{}, &staticIdentityAuthority{
 		accounts: map[string]*core.Account{},
-	})
+	}, &noopServerAuthority{})
 	console, err := web.NewWeb(orch)
 	if err != nil {
 		log.Fatal(err.Error())
