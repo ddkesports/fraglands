@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,12 +14,19 @@ import (
 	"github.com/paralin/fraglands/server"
 )
 
-// fakeProcess implements server.Process for allocator tests.
+// ---------------------------------------------------------------------------
+// test doubles
+// ---------------------------------------------------------------------------
+
+// fakeProcess implements server.Process, server.ProcessStopper,
+// server.ProcessReadinessWaiter, and the hostexec CrashReason getter for
+// allocator tests.
 type fakeProcess struct {
 	mtx       sync.Mutex
 	spec      server.ProcessSpec
 	state     server.ProcessState
 	fact      *server.ReadinessFact
+	reason    *server.CrashReason
 	stopped   bool
 	stopCount int
 	readyOnce sync.Once
@@ -26,6 +35,10 @@ type fakeProcess struct {
 	readyAfter time.Duration
 	// crashBeforeReady makes the process crash instead of becoming ready.
 	crashBeforeReady bool
+	// stateReads and readyReads count external observations; the
+	// allocator must not poll either while waiting for readiness.
+	stateReads int
+	readyReads int
 }
 
 func newFakeAllocatorProcess(spec server.ProcessSpec, readyAfter time.Duration) *fakeProcess {
@@ -41,12 +54,14 @@ func (f *fakeProcess) Spec() server.ProcessSpec { return f.spec }
 func (f *fakeProcess) State() server.ProcessState {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
+	f.stateReads++
 	return f.state
 }
 
 func (f *fakeProcess) Readiness() (server.ReadinessFact, error) {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
+	f.readyReads++
 	if f.fact == nil {
 		return server.ReadinessFact{}, server.ErrNoReadinessFact
 	}
@@ -83,6 +98,7 @@ func (f *fakeProcess) MarkCrashed(reason server.CrashReason) error {
 	if f.state.Terminal() {
 		return server.ErrAlreadyStopped
 	}
+	f.reason = &reason
 	f.state = server.ProcessStateCrashed
 	return nil
 }
@@ -97,17 +113,25 @@ func (f *fakeProcess) MarkStopped() error {
 	return nil
 }
 
+// CrashReason returns the recorded crash reason, mirroring the hostexec
+// handle's optional getter.
+func (f *fakeProcess) CrashReason() (server.CrashReason, error) {
+	f.mtx.Lock()
+	defer f.mtx.Unlock()
+	if f.state != server.ProcessStateCrashed || f.reason == nil {
+		return server.CrashReason{}, server.ErrCrashed
+	}
+	return *f.reason, nil
+}
+
 func (f *fakeProcess) WaitTerminal(ctx context.Context) (server.ProcessState, error) {
 	for {
-		f.mtx.Lock()
-		state := f.state
-		f.mtx.Unlock()
-		if state.Terminal() {
-			return state, nil
+		if s := f.State(); s.Terminal() {
+			return s, nil
 		}
 		select {
 		case <-ctx.Done():
-			return state, ctx.Err()
+			return f.State(), ctx.Err()
 		case <-time.After(2 * time.Millisecond):
 		}
 	}
@@ -142,11 +166,11 @@ func (f *fakeProcess) Stop(ctx context.Context) error {
 }
 
 // WaitReadiness implements server.ProcessReadinessWaiter: it records
-// readiness after readyAfter, or reports a crash if the process became
-// terminal first. It waits on a channel, not by polling state.
+// readiness after readyAfter, or reports ErrNotReady if the process became
+// terminal first.
 func (f *fakeProcess) WaitReadiness(ctx context.Context) (server.ReadinessFact, error) {
-	// The fake records readiness after its configured delay, on a timer
-	// goroutine, exactly once. Negative delay means readiness never comes.
+	// The fake records readiness after its configured delay, exactly once.
+	// A negative delay means readiness never comes.
 	if f.readyAfter >= 0 && !f.crashBeforeReady {
 		f.readyOnce.Do(func() {
 			go func() {
@@ -170,6 +194,7 @@ func (f *fakeProcess) WaitReadiness(ctx context.Context) (server.ReadinessFact, 
 	if f.crashBeforeReady {
 		f.mtx.Lock()
 		if !f.state.Terminal() {
+			f.reason = &server.CrashReason{Code: "exit_nonzero", Message: "crashed before ready"}
 			f.state = server.ProcessStateCrashed
 		}
 		f.mtx.Unlock()
@@ -197,6 +222,61 @@ func (f *fakeProcess) WaitReadiness(ctx context.Context) (server.ReadinessFact, 
 	}
 }
 
+// stopFailsProcess wraps a fakeProcess whose Stop fails while the process
+// is live. The wrapper is the handle the supervisor registers, so reaping
+// the wrapper keeps the registry identity intact.
+type stopFailsProcess struct {
+	*fakeProcess
+}
+
+func (f *stopFailsProcess) Stop(ctx context.Context) error {
+	if f.fakeProcess.State() == server.ProcessStateStopped {
+		return f.fakeProcess.Stop(ctx)
+	}
+	return errors.New("fake: stop failed (host unreachable)")
+}
+
+// stopErrorsButCrashes wraps a fakeProcess whose Stop reports an error even
+// though the process reached the terminal Crashed state during the stop.
+type stopErrorsButCrashes struct {
+	*fakeProcess
+}
+
+func (f *stopErrorsButCrashes) Stop(ctx context.Context) error {
+	_ = f.fakeProcess.MarkCrashed(server.CrashReason{Code: "exit_nonzero", Message: "crashed during stop"})
+	return errors.New("fake: stop error after crash")
+}
+
+// bareProcess is a fakeProcess reduced to exactly the server.Process
+// contract: no WaitReadiness, no Stop. Methods are delegated explicitly so
+// the optional seams are not promoted from the embedded fake.
+type bareProcess struct {
+	f *fakeProcess
+}
+
+func (b *bareProcess) Spec() server.ProcessSpec { return b.f.Spec() }
+func (b *bareProcess) State() server.ProcessState {
+	return b.f.State()
+}
+func (b *bareProcess) Readiness() (server.ReadinessFact, error) {
+	return b.f.Readiness()
+}
+func (b *bareProcess) MarkRunning() error { return b.f.MarkRunning() }
+func (b *bareProcess) MarkReady(fact server.ReadinessFact) error {
+	return b.f.MarkReady(fact)
+}
+func (b *bareProcess) MarkCrashed(reason server.CrashReason) error {
+	return b.f.MarkCrashed(reason)
+}
+func (b *bareProcess) MarkStopped() error { return b.f.MarkStopped() }
+func (b *bareProcess) WaitTerminal(ctx context.Context) (server.ProcessState, error) {
+	return b.f.WaitTerminal(ctx)
+}
+func (b *bareProcess) DeliverArtifact(a server.Artifact) error {
+	return b.f.DeliverArtifact(a)
+}
+func (b *bareProcess) Artifacts() []server.Artifact { return b.f.Artifacts() }
+
 // fakeSupervisor is a server.ProcessLauncher that hands out fake processes
 // through a real *server.Supervisor, and tracks what happened to each
 // process it launched.
@@ -207,7 +287,10 @@ type fakeSupervisor struct {
 	// Behavior applied to every fake process handed out by Launch.
 	readyAfter       time.Duration
 	crashBeforeReady bool
-	supervisor       *server.Supervisor
+	// wrap, when set, wraps the launched fake in an outer handle; the
+	// supervisor registers the wrapped handle, keeping registry identity.
+	wrap       func(*fakeProcess) server.Process
+	supervisor *server.Supervisor
 }
 
 func newFakeSupervisor() *fakeSupervisor {
@@ -230,6 +313,9 @@ func (s *fakeSupervisor) Launch(ctx context.Context, spec server.ProcessSpec) (s
 	proc := newFakeAllocatorProcess(spec, s.readyAfter)
 	proc.crashBeforeReady = s.crashBeforeReady
 	s.launched = append(s.launched, proc)
+	if s.wrap != nil {
+		return s.wrap(proc), nil
+	}
 	return proc, nil
 }
 
@@ -260,7 +346,7 @@ func (s *fakeSupervisor) assertReapedExactlyOnce(t *testing.T, gen uint64, proc 
 	}
 }
 
-func procKey(gen uint64) string { return "proc-" + string(rune('0'+gen)) }
+func procKey(gen uint64) string { return fmt.Sprintf("proc-%d", gen) }
 
 func testAllocator() (*Allocator, *fakeSupervisor) {
 	sup := newFakeSupervisor()
@@ -274,6 +360,10 @@ func testAllocator() (*Allocator, *fakeSupervisor) {
 func revision() *core.ScenarioRevision {
 	return &core.ScenarioRevision{ID: "rev-1", ReplayID: "replay-1", TakeoverTick: 100}
 }
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
 
 func TestAllocatorMarksReadyWithConnectAddress(t *testing.T) {
 	a, sup := testAllocator()
@@ -299,6 +389,9 @@ func TestAllocatorMarksReadyWithConnectAddress(t *testing.T) {
 	if sup.supervisor.Live() != 1 {
 		t.Fatalf("expected 1 live process, got %d", sup.supervisor.Live())
 	}
+	if _, err := sup.supervisor.Get(procKey(1)); err != nil {
+		t.Fatalf("successful process must stay supervisor-owned: %v", err)
+	}
 }
 
 func TestAllocatorLaunchFailureIsTyped(t *testing.T) {
@@ -310,9 +403,6 @@ func TestAllocatorLaunchFailureIsTyped(t *testing.T) {
 	}
 
 	_, err = a.Allocate(context.Background(), revision())
-	if err == nil {
-		t.Fatal("expected typed allocation error")
-	}
 	var allocErr *orchestrator.AllocationError
 	if !errors.As(err, &allocErr) {
 		t.Fatalf("expected *orchestrator.AllocationError, got %T", err)
@@ -335,12 +425,9 @@ func TestAllocatorContextCancelBeforeStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, aerr := a.Allocate(ctx, revision())
-	if aerr == nil {
-		t.Fatal("expected typed allocation error on cancelled context")
-	}
 	var allocErr *orchestrator.AllocationError
 	if !errors.As(aerr, &allocErr) {
-		t.Fatalf("expected *orchestrator.AllocationError, got %T", aerr)
+		t.Fatalf("expected *orchestrator.AllocationError, got %v", aerr)
 	}
 	if sup.supervisor.Live() != 0 {
 		t.Fatalf("expected no live processes, got %d", sup.supervisor.Live())
@@ -348,10 +435,10 @@ func TestAllocatorContextCancelBeforeStart(t *testing.T) {
 }
 
 func TestAllocatorContextCancelDuringReadiness(t *testing.T) {
-	// readyAfter is longer than the test's patience: the cancel must win.
+	// Readiness is 10s away; the cancel must win long before.
 	sup := newFakeSupervisor()
 	sup.readyAfter = 10 * time.Second
-	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(300*time.Millisecond))
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(30*time.Second))
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -367,12 +454,9 @@ func TestAllocatorContextCancelDuringReadiness(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("expected typed allocation error after cancel")
-		}
 		var allocErr *orchestrator.AllocationError
 		if !errors.As(err, &allocErr) {
-			t.Fatalf("expected *orchestrator.AllocationError, got %T", err)
+			t.Fatalf("expected *orchestrator.AllocationError, got %v", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Allocate did not return after cancel")
@@ -384,17 +468,28 @@ func TestAllocatorContextCancelDuringReadiness(t *testing.T) {
 		t.Fatalf("expected 0 live processes after failed allocation, got %d", sup.supervisor.Live())
 	}
 	sup.assertReapedExactlyOnce(t, 1, sup.launchedByGeneration(1))
+
+	// No polling: while waiting for readiness the allocator must not have
+	// observed the process state or readiness fact repeatedly. The only
+	// State() reads come from cleanup (and the supervisor's own reap
+	// check); Readiness() must never have been read.
+	fp := sup.launchedByGeneration(1)
+	if fp.readyReads != 0 {
+		t.Fatalf("allocator must not poll readiness, got %d reads", fp.readyReads)
+	}
+	if fp.stateReads > 2 {
+		t.Fatalf("allocator must not poll state, got %d reads", fp.stateReads)
+	}
 }
 
 func TestAllocatorTerminalBeforeReadyIsFailure(t *testing.T) {
 	sup := newFakeSupervisor()
+	sup.crashBeforeReady = true
 	a, err := NewAllocator(sup.supervisor)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 
-	// Force the process to crash before readiness is recorded.
-	sup.crashBeforeReady = true
 	done := make(chan error, 1)
 	go func() {
 		_, err := a.Allocate(context.Background(), revision())
@@ -405,7 +500,11 @@ func TestAllocatorTerminalBeforeReadyIsFailure(t *testing.T) {
 	case err := <-done:
 		var allocErr *orchestrator.AllocationError
 		if !errors.As(err, &allocErr) {
-			t.Fatalf("expected *orchestrator.AllocationError, got %T", err)
+			t.Fatalf("expected *orchestrator.AllocationError, got %T (%v)", err, err)
+		}
+		// The specific crash reason must be preserved in the failure.
+		if !strings.Contains(allocErr.Reason.Message, "exit_nonzero") {
+			t.Fatalf("crash reason must be preserved, got %q", allocErr.Reason.Message)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Allocate did not return after crash")
@@ -421,22 +520,19 @@ func TestAllocatorTerminalBeforeReadyIsFailure(t *testing.T) {
 }
 
 func TestAllocatorCleansUpExactlyOnceOnFailure(t *testing.T) {
-	// readyAfter negative: readiness is never recorded, so allocation
-	// fails through the readiness timeout.
+	// readiness is never recorded, so allocation fails through the
+	// readiness timeout.
 	sup := newFakeSupervisor()
-	sup.readyAfter = -1 // readiness is never recorded
+	sup.readyAfter = -1
 	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(80*time.Millisecond))
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 
 	_, err = a.Allocate(context.Background(), revision())
-	if err == nil {
-		t.Fatal("expected typed allocation error on readiness timeout")
-	}
 	var allocErr *orchestrator.AllocationError
 	if !errors.As(err, &allocErr) {
-		t.Fatalf("expected *orchestrator.AllocationError, got %T", err)
+		t.Fatalf("expected *orchestrator.AllocationError, got %v", err)
 	}
 
 	if sup.supervisor.Live() != 0 {
@@ -449,6 +545,148 @@ func TestAllocatorCleansUpExactlyOnceOnFailure(t *testing.T) {
 	}
 	if fp.stopCount != 1 {
 		t.Fatalf("expected exactly 1 stop, got %d", fp.stopCount)
+	}
+}
+
+// Stop fails while the process is live, but the process becomes terminal
+// anyway: cleanup must treat the terminal state as the reclaim (crash truth
+// preserved) and report an ordinary allocation failure, not a cleanup
+// failure.
+func TestAllocatorStopFailsButProcessTerminal(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &stopErrorsButCrashes{fakeProcess: fp}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(80*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, aerr := a.Allocate(context.Background(), revision())
+	var allocErr *orchestrator.AllocationError
+	if !errors.As(aerr, &allocErr) {
+		t.Fatalf("expected *orchestrator.AllocationError, got %v", aerr)
+	}
+	// The crash reason from the stop window is preserved.
+	if !strings.Contains(allocErr.Reason.Message, "exit_nonzero") {
+		t.Fatalf("crash reason must be preserved, got %q", allocErr.Reason.Message)
+	}
+
+	if sup.supervisor.Live() != 0 {
+		t.Fatalf("expected 0 live processes, got %d", sup.supervisor.Live())
+	}
+	sup.assertReapedExactlyOnce(t, 1, sup.launchedByGeneration(1))
+}
+
+// Stop fails while the process is live and stays live: cleanup cannot
+// reclaim it, so Allocate must return a CleanupError (recoverable
+// ownership) instead of an ordinary allocation failure.
+func TestAllocatorStopFailsProcessRemainsLive(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &stopFailsProcess{fakeProcess: fp}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(80*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, err = a.Allocate(context.Background(), revision())
+	var ce *CleanupError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *CleanupError, got %v", err)
+	}
+	if ce.Generation != 1 {
+		t.Fatalf("expected generation 1 in CleanupError, got %d", ce.Generation)
+	}
+	if ce.Reason == nil || ce.Reason.Code != orchestrator.AllocationFailureCode {
+		t.Fatalf("CleanupError must carry the allocation reason, got %+v", ce.Reason)
+	}
+
+	// The process must still be visible in the supervisor registry (live,
+	// recoverable) - NOT silently reaped or forgotten.
+	if sup.supervisor.Live() != 1 {
+		t.Fatalf("expected the un-reclaimed process to remain live, got %d live", sup.supervisor.Live())
+	}
+	if _, err := sup.supervisor.Get(procKey(1)); err != nil {
+		t.Fatalf("process must remain recoverable via supervisor.Get: %v", err)
+	}
+}
+
+// A process that exposes neither WaitReadiness nor Stop and is already
+// terminal: the allocation fails with a typed AllocationError and the
+// process is reaped exactly once (never a silent leak).
+func TestAllocatorNonWaiterNonStopper(t *testing.T) {
+	sup := newFakeSupervisor()
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(100*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// Launch through the supervisor with the optional seams hidden: the
+	// registered handle is a bare server.Process. Crash it before
+	// readiness so cleanup has a terminal process to reap.
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &bareProcess{f: fp}
+	}
+	proc, err := sup.supervisor.Start(context.Background())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	bare := proc.(*bareProcess)
+	if err := bare.MarkRunning(); err != nil {
+		t.Fatal(err.Error())
+	}
+	if err := bare.MarkCrashed(server.CrashReason{Code: "exit_nonzero", Message: "died"}); err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, err = a.waitReadiness(context.Background(), bare)
+	if err == nil {
+		t.Fatal("expected readiness-wait failure for non-waiter process")
+	}
+
+	// Cleanup on a terminal non-stopper: skip stop (terminal), reap only.
+	if err := a.cleanup(bare); err != nil {
+		t.Fatalf("cleanup of a terminal non-stopper should succeed: %v", err)
+	}
+	sup.assertReapedExactlyOnce(t, 1, bare)
+}
+
+// Reap refuses a live process: cleanup must surface that as a recoverable
+// CleanupError instead of pretending the reservation was freed.
+func TestAllocatorReapRefusalSurfacesCleanupError(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	// A live process with NO stopper: cleanup cannot stop it, so Reap is
+	// never reached or is refused. The supervisor registers the bare
+	// handle, so the registry identity holds for the refused reap.
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &bareProcess{f: fp}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(60*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, aerr := a.Allocate(context.Background(), revision())
+	var ce *CleanupError
+	if !errors.As(aerr, &ce) {
+		t.Fatalf("expected *CleanupError, got %v", aerr)
+	}
+	if ce.Generation != 1 {
+		t.Fatalf("expected generation 1 in CleanupError, got %d", ce.Generation)
+	}
+
+	// The live process remains registered (recoverable ownership): no
+	// invisible live child, no lost reservation.
+	if sup.supervisor.Live() != 1 {
+		t.Fatalf("expected the process to remain live and registered, got %d", sup.supervisor.Live())
+	}
+	if _, err := sup.supervisor.Get(procKey(1)); err != nil {
+		t.Fatalf("process must remain recoverable via supervisor.Get: %v", err)
 	}
 }
 
