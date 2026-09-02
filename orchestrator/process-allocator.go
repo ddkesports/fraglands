@@ -10,9 +10,13 @@ import (
 // orchestrator depends on this interface only: a real worker implementation
 // replaces the in-memory one without touching the coordinated path.
 type ProcessAllocator interface {
-	// Allocate starts one server process generation for the revision and
-	// returns it before its readiness is proven. The returned process
-	// carries the generation and connect address; readiness is recorded
-	// separately on the process as explicit evidence.
+	// Allocate starts one server process generation for the revision. It
+	// may block until readiness is proven, in which case the returned
+	// process carries the generation, connect address, and readiness
+	// evidence; or it may return the process before readiness is proven,
+	// in which case readiness is recorded separately on the process as
+	// explicit evidence. It must not return a process marked ready
+	// without evidence, and it must not return a process that has
+	// already become terminal.
 	Allocate(ctx context.Context, revision *core.ScenarioRevision) (*AllocatedProcess, error)
 }
