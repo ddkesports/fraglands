@@ -98,6 +98,12 @@ type CompileRequest struct {
 	// fields. Zero means no budget was declared, which can never yield a
 	// Complete grant.
 	MaxFreshnessTicks uint32
+	// ProvenTickInterval is the exact seconds-per-tick proven from the replay
+	// itself (CSVCMsg_ServerInfo tick_interval via the parser clock), passed
+	// by the caller. The compiler never assumes a rate: zero or a
+	// non-positive interval is a refusal, because the lead-in window cannot
+	// be converted from seconds to ticks without provenance.
+	ProvenTickInterval float64
 	// RevisionID is the caller-supplied immutable revision identifier. The
 	// compiler never invents one.
 	RevisionID string
@@ -127,8 +133,9 @@ type CompileOutcome struct {
 // ScenarioRevision, or refuses with a typed reason. The rules are
 // fail-closed:
 //
-//   - a zero tick, an unsupported schema version, or a missing revision ID is
-//     a refusal: there is no honest revision to build;
+//   - a zero tick, an unsupported schema version, a missing revision ID, or
+//     an absent/invalid proven tick interval is a refusal: there is no honest
+//     revision to build;
 //   - an ineligible facts record compiles to a Preview revision carrying an
 //     OmissionIneligible entry, never to Complete;
 //   - every missing or stale hero kinematic field, and every present field
@@ -149,13 +156,17 @@ func Compile(req CompileRequest) CompileOutcome {
 	if req.RevisionID == "" {
 		return refusalOutcome("revision id is empty: the caller must supply one")
 	}
+	if req.ProvenTickInterval <= 0 {
+		return refusalOutcome(
+			"proven tick interval absent or invalid: lead-in seconds cannot be converted to ticks without provenance")
+	}
 
 	omissions := collectOmissions(req)
 
 	revision := &ScenarioRevision{
 		ID:              req.RevisionID,
 		ReplayID:        replayIdentityID(req.Facts.Source),
-		LeadInStartTick: leadInStartTick(req.Facts.Tick),
+		LeadInStartTick: leadInStartTick(req.Facts.Tick, req.ProvenTickInterval),
 		TakeoverTick:    req.Facts.Tick,
 		Fidelity:        grantedFidelity(omissions),
 		Omissions:       omissions,
@@ -266,23 +277,28 @@ func grantedFidelity(omissions []Omission) Fidelity {
 	return FidelityComplete
 }
 
-// leadInStartTick derives the lead-in start from the takeover tick using the
-// plan's five-second default, clamped to the 0-10 second window and to the
-// start of the replay. The tick rate is the Deadlock server tick rate.
-func leadInStartTick(takeoverTick uint32) uint32 {
-	const (
-		tickRate           = 30 // Deadlock server ticks per second
-		defaultLeadInTicks = 5 * tickRate
-		maxLeadInTicks     = 10 * tickRate
-	)
-	leadIn := uint32(defaultLeadInTicks)
-	if leadIn > maxLeadInTicks {
-		leadIn = maxLeadInTicks
+// Lead-in window constants in seconds. The plan locks the default at five
+// seconds and the maximum at ten; the tick conversion itself always uses the
+// caller's proven interval, never a compiled-in rate.
+const (
+	DefaultLeadInSeconds = 5.0
+	MaxLeadInSeconds     = 10.0
+)
+
+// leadInStartTick converts the plan's five-second default lead-in into ticks
+// using the proven seconds-per-tick interval, clamped to the 0-10 second
+// window and to the start of the replay. The caller must have validated the
+// interval before calling Compile.
+func leadInStartTick(takeoverTick uint32, secondsPerTick float64) uint32 {
+	leadInSeconds := DefaultLeadInSeconds
+	if leadInSeconds > MaxLeadInSeconds {
+		leadInSeconds = MaxLeadInSeconds
 	}
-	if leadIn > takeoverTick {
-		leadIn = takeoverTick
+	leadInTicks := uint32(leadInSeconds / secondsPerTick)
+	if leadInTicks > takeoverTick {
+		leadInTicks = takeoverTick
 	}
-	return takeoverTick - leadIn
+	return takeoverTick - leadInTicks
 }
 
 // replayIdentityID derives the stable replay identifier from the facts source

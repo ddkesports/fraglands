@@ -36,6 +36,10 @@ func RevisionID(facts analysis.RunbackFacts) string {
 // to ready; or fails the preparation closed with one typed reason and no
 // partial state.
 //
+// provenTickInterval must be the exact seconds-per-tick proven from the
+// replay itself (CSVCMsg_ServerInfo tick_interval via the parser clock); a
+// non-positive value is refused by the compiler and fails the preparation.
+//
 // A returned error means the preparation was transitioned to failed; the
 // caller must not retry or reuse the preparation.
 func PrepareScenario(
@@ -43,16 +47,18 @@ func PrepareScenario(
 	facts analysis.RunbackFacts,
 	caps map[string]CapabilityRequirement,
 	maxFreshnessTicks uint32,
+	provenTickInterval float64,
 ) (*ScenarioRevision, []Omission, error) {
 	if err := prep.MarkRunning(); err != nil {
 		return nil, nil, errors.Wrap(err, "core: mark preparation running")
 	}
 
 	out := Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      caps,
-		MaxFreshnessTicks: maxFreshnessTicks,
-		RevisionID:        RevisionID(facts),
+		Facts:              facts,
+		Capabilities:       caps,
+		MaxFreshnessTicks:  maxFreshnessTicks,
+		ProvenTickInterval: provenTickInterval,
+		RevisionID:         RevisionID(facts),
 	})
 
 	if out.Refusal != nil {

@@ -36,10 +36,11 @@ func runbackFactsFixture() analysis.RunbackFacts {
 func TestCompileGrantsCompleteWithNoOmissions(t *testing.T) {
 	facts := runbackFactsFixture()
 	out := Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      DefaultRunbackCapabilities(),
-		MaxFreshnessTicks: 5,
-		RevisionID:        "rev-1",
+		Facts:              facts,
+		Capabilities:       DefaultRunbackCapabilities(),
+		MaxFreshnessTicks:  5,
+		ProvenTickInterval: 1.0 / 64.0,
+		RevisionID:         "rev-1",
 	})
 	if out.Refusal != nil {
 		t.Fatalf("unexpected refusal: %v", out.Refusal)
@@ -59,8 +60,8 @@ func TestCompileGrantsCompleteWithNoOmissions(t *testing.T) {
 	if out.Revision.ReplayID != "abc123" {
 		t.Fatalf("expected replay id from sha256, got %s", out.Revision.ReplayID)
 	}
-	if out.Revision.LeadInStartTick != 63280-150 {
-		t.Fatalf("expected lead-in start, got %d", out.Revision.LeadInStartTick)
+	if out.Revision.LeadInStartTick != 63280-320 {
+		t.Fatalf("expected lead-in start 63280-320, got %d", out.Revision.LeadInStartTick)
 	}
 }
 
@@ -69,10 +70,11 @@ func TestCompileMissingFieldIsTypedNotObserved(t *testing.T) {
 	facts.Heroes[0].Velocity[1] = analysis.RunbackFloat{MissingReason: analysis.RunbackMissingNotInSample}
 
 	out := Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      DefaultRunbackCapabilities(),
-		MaxFreshnessTicks: 5,
-		RevisionID:        "rev-1",
+		Facts:              facts,
+		Capabilities:       DefaultRunbackCapabilities(),
+		MaxFreshnessTicks:  5,
+		ProvenTickInterval: 1.0 / 64.0,
+		RevisionID:         "rev-1",
 	})
 	if out.Refusal != nil {
 		t.Fatalf("unexpected refusal: %v", out.Refusal)
@@ -96,10 +98,11 @@ func TestCompileStaleFieldForcesPreview(t *testing.T) {
 	facts.Heroes[0].Position[0].FreshnessTicks = 20
 
 	out := Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      DefaultRunbackCapabilities(),
-		MaxFreshnessTicks: 5,
-		RevisionID:        "rev-1",
+		Facts:              facts,
+		Capabilities:       DefaultRunbackCapabilities(),
+		MaxFreshnessTicks:  5,
+		ProvenTickInterval: 1.0 / 64.0,
+		RevisionID:         "rev-1",
 	})
 	if out.Revision.Fidelity != FidelityPreview {
 		t.Fatalf("expected preview, got %s", out.Revision.Fidelity)
@@ -118,10 +121,11 @@ func TestCompileUnsupportedCapabilityForcesPreview(t *testing.T) {
 	caps["velocity.x"] = partial
 
 	out := Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      caps,
-		MaxFreshnessTicks: 5,
-		RevisionID:        "rev-1",
+		Facts:              facts,
+		Capabilities:       caps,
+		MaxFreshnessTicks:  5,
+		ProvenTickInterval: 1.0 / 64.0,
+		RevisionID:         "rev-1",
 	})
 	if out.Revision.Fidelity != FidelityPreview {
 		t.Fatalf("expected preview, got %s", out.Revision.Fidelity)
@@ -137,10 +141,11 @@ func TestCompileUnsupportedCapabilityForcesPreview(t *testing.T) {
 func TestCompileUndeclaredFreshnessBudgetForcesPreview(t *testing.T) {
 	facts := runbackFactsFixture()
 	out := Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      DefaultRunbackCapabilities(),
-		MaxFreshnessTicks: 0,
-		RevisionID:        "rev-1",
+		Facts:              facts,
+		Capabilities:       DefaultRunbackCapabilities(),
+		MaxFreshnessTicks:  0,
+		ProvenTickInterval: 1.0 / 64.0,
+		RevisionID:         "rev-1",
 	})
 	if out.Revision.Fidelity != FidelityPreview {
 		t.Fatalf("expected preview with no declared budget, got %s", out.Revision.Fidelity)
@@ -158,10 +163,11 @@ func TestCompileIneligibleFactsNeverGrantsComplete(t *testing.T) {
 	facts.EligibilityReasons = []string{"hero row has missing or stale exact fields"}
 
 	out := Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      DefaultRunbackCapabilities(),
-		MaxFreshnessTicks: 5,
-		RevisionID:        "rev-1",
+		Facts:              facts,
+		Capabilities:       DefaultRunbackCapabilities(),
+		MaxFreshnessTicks:  5,
+		ProvenTickInterval: 1.0 / 64.0,
+		RevisionID:         "rev-1",
 	})
 	if out.Revision.Fidelity != FidelityPreview {
 		t.Fatalf("expected preview, got %s", out.Revision.Fidelity)
@@ -231,10 +237,11 @@ func TestCompileDoesNotMutateInputFacts(t *testing.T) {
 	facts := runbackFactsFixture()
 	before := facts.Heroes[0]
 	_ = Compile(CompileRequest{
-		Facts:             facts,
-		Capabilities:      DefaultRunbackCapabilities(),
-		MaxFreshnessTicks: 5,
-		RevisionID:        "rev-1",
+		Facts:              facts,
+		Capabilities:       DefaultRunbackCapabilities(),
+		MaxFreshnessTicks:  5,
+		ProvenTickInterval: 1.0 / 64.0,
+		RevisionID:         "rev-1",
 	})
 	if !reflect.DeepEqual(facts.Heroes[0], before) {
 		t.Fatal("compile mutated the input facts")
@@ -248,7 +255,7 @@ func TestPrepareScenarioWiresFactsIntoRevision(t *testing.T) {
 	facts := runbackFactsFixture()
 	prep := NewScenarioPreparation("prep-1", "replay-1", 0, 63280)
 
-	rev, omissions, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5)
+	rev, omissions, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5, 1.0/64.0)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -278,7 +285,7 @@ func TestPrepareScenarioFailsClosedWithTypedReason(t *testing.T) {
 	facts.Heroes[0].Facing[2] = analysis.RunbackFloat{MissingReason: analysis.RunbackMissingNotRecorded}
 
 	prep := NewScenarioPreparation("prep-2", "replay-1", 0, 63280)
-	_, _, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5)
+	_, _, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5, 1.0/64.0)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -305,7 +312,7 @@ func TestPrepareScenarioRefusalFailsClosed(t *testing.T) {
 	facts.Tick = 0 // malformed: no moment selected
 
 	prep := NewScenarioPreparation("prep-3", "replay-1", 0, 0)
-	_, _, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5)
+	_, _, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5, 1.0/64.0)
 	if err == nil {
 		t.Fatal("expected a typed failure")
 	}
