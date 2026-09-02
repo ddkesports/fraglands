@@ -152,8 +152,12 @@ func (g *SummaryIngestionGate) Ingest(req IngestRequest) error {
 
 	// 6. Bind the decoded identity to the authenticated participant: the
 	//    participant cannot submit summaries for another process
-	//    generation.
+	//    generation. The artifact filename's generation must also agree
+	//    with the payload, closing the name/payload split.
 	if summary.ServerProcessGeneration != participant.ProcessGeneration {
+		return ErrSummaryIdentityMismatch
+	}
+	if summary.AttemptGeneration != req.AttemptGeneration {
 		return ErrSummaryIdentityMismatch
 	}
 
