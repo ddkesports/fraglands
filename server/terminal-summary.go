@@ -42,12 +42,12 @@ var (
 	// ErrSummaryTraversal is returned when an artifact name escapes the
 	// spool directory.
 	ErrSummaryTraversal = fmt.Errorf("server: artifact name escapes the spool directory")
+	// ErrSummaryIdentityMismatch is returned when the decoded identity does
+	// not match the authenticated server participant.
+	ErrSummaryIdentityMismatch = fmt.Errorf("server: terminal summary identity mismatch")
 	// ErrUnauthenticated is returned when the presented server credential
 	// does not resolve to an authenticated server participant.
 	ErrUnauthenticated = fmt.Errorf("server: unauthenticated server participant")
-	// ErrSummaryIdentityMismatch is returned when the decoded identity does
-	// not match the authenticated participant or the prior admission.
-	ErrSummaryIdentityMismatch = fmt.Errorf("server: terminal summary identity mismatch")
 )
 
 // summaryField is one known wire field of the TerminalSummary contract.
