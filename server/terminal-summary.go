@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/aperturerobotics/fastjson"
 )
@@ -13,14 +14,15 @@ import (
 // decoder refuses the old format instead of guessing.
 const TerminalSummaryVersion = "runback-attempt/v1"
 
-// MaxTerminalSummaryBytes bounds one artifact accepted for decoding. It is
-// generous enough for a large timeline, disconnect, and fact list, but small
-// enough that a runaway or hostile artifact cannot exhaust the host.
+// MaxTerminalSummaryBytes bounds one artifact accepted for decoding. The
+// real spool record is one short JSON line; the bound exists so a runaway
+// or hostile artifact cannot exhaust the host.
 const MaxTerminalSummaryBytes = 64 << 10
 
 // TerminalSummaryArtifactName is the artifact name bound to the terminal
-// summary contract.
-const TerminalSummaryArtifactName = "terminal-summary.json"
+// summary contract, matching the writer: "runback_summary_gen" plus the
+// attempt generation plus ".json" (see modlock runback_attempt_feed.cc).
+const TerminalSummaryArtifactName = "runback_summary_gen"
 
 // Errors for typed refusals. Callers match with errors.Is.
 var (
@@ -61,17 +63,15 @@ const (
 	fieldServerProcessGeneration
 	fieldAttemptGeneration
 	fieldTakeoverTick
-	fieldTakeoverAtSeconds
 	fieldEnding
 	fieldEndedAtSeconds
-	fieldTimeline
-	fieldDisconnects
-	fieldFacts
 	fieldCount
 )
 
 // summaryFieldNames lists every known field in wire form, indexed by field
-// id.
+// id. It mirrors exactly the eight keys emitted by the modlock spool writer
+// for runback-attempt/v1: no timeline, disconnects, facts, or
+// takeover_at_seconds.
 var summaryFieldNames = [fieldCount]string{
 	fieldVersion:                 "version",
 	fieldReplayIdentity:          "replay_identity",
@@ -79,12 +79,8 @@ var summaryFieldNames = [fieldCount]string{
 	fieldServerProcessGeneration: "server_process_generation",
 	fieldAttemptGeneration:       "attempt_generation",
 	fieldTakeoverTick:            "takeover_tick",
-	fieldTakeoverAtSeconds:       "takeover_at_seconds",
 	fieldEnding:                  "ending",
 	fieldEndedAtSeconds:          "ended_at_seconds",
-	fieldTimeline:                "timeline",
-	fieldDisconnects:             "disconnects",
-	fieldFacts:                   "facts",
 }
 
 // summaryFieldIndex maps a wire field name to its field id.
@@ -96,74 +92,30 @@ var summaryFieldIndex = func() map[string]summaryField {
 	return m
 }()
 
-// TerminalSummary mirrors the modlock runback TerminalSummary contract
-// (runback-attempt/v1): the immutable record an attempt publishes exactly
-// once when it ends, bound to the attempt's identity: replay identity,
-// revision, server process generation, attempt generation, and takeover
-// tick. The identity fields are required: a spool artifact that cannot
-// prove them is never decoded into a result.
+// TerminalSummary mirrors the exact spool record the modlock host writes
+// for runback-attempt/v1: eight keys, one JSON line per attempt generation.
+// It is narrower than the in-process C++ TerminalSummary: the writer omits
+// timeline, disconnects, facts, and takeover_at_seconds, so those are not
+// part of the wire contract and their presence is refused.
 type TerminalSummary struct {
 	// Version is the contract version; only TerminalSummaryVersion is
 	// accepted.
 	Version string
-	// ReplayIdentity is the replay the attempt ran against.
-	ReplayIdentity string
 	// Revision is the immutable revision the attempt ran against.
 	Revision string
+	// ReplayIdentity is the replay the attempt ran against.
+	ReplayIdentity string
+	// AttemptGeneration is the attempt's own generation.
+	AttemptGeneration uint64
 	// ServerProcessGeneration is the server process generation that hosted
 	// the attempt.
 	ServerProcessGeneration uint64
-	// AttemptGeneration is the attempt's own generation.
-	AttemptGeneration uint64
 	// TakeoverTick is the timecode measurement started at.
 	TakeoverTick uint32
-	// TakeoverAtSeconds is the attempt-clock second of takeover.
-	TakeoverAtSeconds uint32
 	// Ending is the typed ending; one of the contract's ending names.
 	Ending string
 	// EndedAtSeconds is the attempt-clock second the attempt ended at.
 	EndedAtSeconds uint32
-	// Timeline is the timestamped phase transitions.
-	Timeline []AttemptTransition
-	// Disconnects is the disconnect-to-bot conversions.
-	Disconnects []DisconnectRecord
-	// Facts is the comparison facts.
-	Facts []ComparisonFact
-}
-
-// AttemptTransition is one timestamped phase transition. Timestamps are on
-// the attempt clock in seconds since takeover.
-type AttemptTransition struct {
-	// State is the phase; one of the contract's state names.
-	State string
-	// AtSeconds is the attempt-clock second of the transition.
-	AtSeconds uint32
-}
-
-// DisconnectRecord is one disconnect-to-bot conversion.
-type DisconnectRecord struct {
-	// EntityID is the entity that disconnected.
-	EntityID uint32
-	// DisconnectedAtSeconds is the attempt-clock second of the disconnect.
-	DisconnectedAtSeconds uint32
-	// ReclaimedAtSeconds is set when the identity reclaimed the pawn.
-	ReclaimedAtSeconds *uint32
-}
-
-// ComparisonFact is one comparison fact in the terminal summary. The
-// comparison is the record; there is no score. An unsupported fact carries
-// an explicit reason instead of a fabricated value.
-type ComparisonFact struct {
-	// Name is the compared field.
-	Name string
-	// Source is the typed source; one of the contract's source names.
-	Source string
-	// Value is the observed value.
-	Value string
-	// ReplayValue is the replay-derived value.
-	ReplayValue string
-	// UnsupportedReason is set when Source is "unsupported".
-	UnsupportedReason string
 }
 
 // validEndingNames are the only ending values the contract admits.
@@ -174,32 +126,27 @@ var validEndingNames = map[string]bool{
 	"infrastructure-failure": true,
 }
 
-// validFactSourceNames are the only fact sources the contract admits.
-var validFactSourceNames = map[string]bool{
-	"replay-derived":  true,
-	"server-observed": true,
-	"unsupported":     true,
-}
-
-// validTimelineStates are the only timeline states the contract admits.
-var validTimelineStates = map[string]bool{
-	"prepared":  true,
-	"countdown": true,
-	"live":      true,
-	"ended":     true,
-}
-
 // ValidateArtifactName refuses artifact names that could escape the spool
-// directory: path separators, parent references, absolute paths, and empty
-// names. The artifact name is untrusted worker input.
-func ValidateArtifactName(name string) error {
+// directory or that do not match the writer's naming scheme
+// ("runback_summary_gen<generation>.json"). The artifact name is untrusted
+// worker input; generation must be the attempt generation the record
+// carries.
+func ValidateArtifactName(name string, attemptGeneration uint64) error {
 	if name == "" {
 		return fmt.Errorf("%w: empty artifact name", ErrSummaryTraversal)
 	}
-	if name != TerminalSummaryArtifactName {
-		// The spool ingestion contract admits exactly one artifact name
-		// today; anything else is refused before it is ever opened.
+	prefix := "runback_summary_gen"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".json") {
 		return fmt.Errorf("%w: unknown artifact %q", ErrSummaryTraversal, name)
+	}
+	genPart := name[len(prefix) : len(name)-len(".json")]
+	if genPart == "" {
+		return fmt.Errorf("%w: missing generation in %q", ErrSummaryTraversal, name)
+	}
+	// The digits must exactly match the decimal form of the generation:
+	// leading zeros, extra digits, or a different generation are refused.
+	if genPart != strconv.FormatUint(attemptGeneration, 10) {
+		return fmt.Errorf("%w: artifact name %q does not match generation %d", ErrSummaryTraversal, name, attemptGeneration)
 	}
 	return nil
 }
@@ -307,16 +254,8 @@ func decodeSummaryField(summary *TerminalSummary, id summaryField, v *fastjson.V
 		summary.AttemptGeneration, err = decodeUint64(v)
 	case fieldTakeoverTick:
 		summary.TakeoverTick, err = decodeUint32(v)
-	case fieldTakeoverAtSeconds:
-		summary.TakeoverAtSeconds, err = decodeUint32(v)
 	case fieldEndedAtSeconds:
 		summary.EndedAtSeconds, err = decodeUint32(v)
-	case fieldTimeline:
-		summary.Timeline, err = decodeTimeline(v)
-	case fieldDisconnects:
-		summary.Disconnects, err = decodeDisconnects(v)
-	case fieldFacts:
-		summary.Facts, err = decodeFacts(v)
 	default:
 		err = fmt.Errorf("%w: unhandled field", ErrSummaryMalformed)
 	}
@@ -352,159 +291,6 @@ func decodeUint32(v *fastjson.Value) (uint32, error) {
 		return 0, fmt.Errorf("value %d exceeds uint32 range", u)
 	}
 	return uint32(u), nil
-}
-
-// decodeTimeline decodes the timeline array.
-func decodeTimeline(v *fastjson.Value) ([]AttemptTransition, error) {
-	items, err := v.Array()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]AttemptTransition, 0, len(items))
-	for i, item := range items {
-		obj, err := item.Object()
-		if err != nil {
-			return nil, fmt.Errorf("item %d is not an object", i)
-		}
-		stateV := obj.Get("state")
-		if stateV == nil {
-			return nil, fmt.Errorf("item %d missing state", i)
-		}
-		state, err := decodeString(stateV)
-		if err != nil {
-			return nil, fmt.Errorf("item %d state: %v", i, err)
-		}
-		if !validTimelineStates[state] {
-			return nil, fmt.Errorf("item %d unknown state %q", i, state)
-		}
-		atV := obj.Get("at_seconds")
-		if atV == nil {
-			return nil, fmt.Errorf("item %d missing at_seconds", i)
-		}
-		at, err := decodeUint32(atV)
-		if err != nil {
-			return nil, fmt.Errorf("item %d at_seconds: %v", i, err)
-		}
-		// Timeline objects carry exactly the two contract fields.
-		if obj.Len() != 2 {
-			return nil, fmt.Errorf("item %d has %d fields, want 2", i, obj.Len())
-		}
-		out = append(out, AttemptTransition{State: state, AtSeconds: at})
-	}
-	return out, nil
-}
-
-// decodeDisconnects decodes the disconnects array.
-func decodeDisconnects(v *fastjson.Value) ([]DisconnectRecord, error) {
-	items, err := v.Array()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]DisconnectRecord, 0, len(items))
-	for i, item := range items {
-		obj, err := item.Object()
-		if err != nil {
-			return nil, fmt.Errorf("item %d is not an object", i)
-		}
-		entityV := obj.Get("entity_id")
-		if entityV == nil {
-			return nil, fmt.Errorf("item %d missing entity_id", i)
-		}
-		entity, err := decodeUint32(entityV)
-		if err != nil {
-			return nil, fmt.Errorf("item %d entity_id: %v", i, err)
-		}
-		disV := obj.Get("disconnected_at_seconds")
-		if disV == nil {
-			return nil, fmt.Errorf("item %d missing disconnected_at_seconds", i)
-		}
-		disconnectedAt, err := decodeUint32(disV)
-		if err != nil {
-			return nil, fmt.Errorf("item %d disconnected_at_seconds: %v", i, err)
-		}
-		var reclaimed *uint32
-		if recV := obj.Get("reclaimed_at_seconds"); recV != nil {
-			if recV.Type() == fastjson.TypeNull {
-				reclaimed = nil
-			} else {
-				rec, err := decodeUint32(recV)
-				if err != nil {
-					return nil, fmt.Errorf("item %d reclaimed_at_seconds: %v", i, err)
-				}
-				reclaimed = &rec
-			}
-		}
-		// Disconnect objects carry exactly the three contract fields.
-		if obj.Len() != 3 {
-			return nil, fmt.Errorf("item %d has %d fields, want 3", i, obj.Len())
-		}
-		out = append(out, DisconnectRecord{
-			EntityID:              entity,
-			DisconnectedAtSeconds: disconnectedAt,
-			ReclaimedAtSeconds:    reclaimed,
-		})
-	}
-	return out, nil
-}
-
-// decodeFacts decodes the comparison facts array.
-func decodeFacts(v *fastjson.Value) ([]ComparisonFact, error) {
-	items, err := v.Array()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ComparisonFact, 0, len(items))
-	for i, item := range items {
-		obj, err := item.Object()
-		if err != nil {
-			return nil, fmt.Errorf("item %d is not an object", i)
-		}
-		fact := ComparisonFact{}
-		nameV := obj.Get("name")
-		if nameV == nil {
-			return nil, fmt.Errorf("item %d missing name", i)
-		}
-		fact.Name, err = decodeString(nameV)
-		if err != nil {
-			return nil, fmt.Errorf("item %d name: %v", i, err)
-		}
-		if fact.Name == "" {
-			return nil, fmt.Errorf("item %d empty name", i)
-		}
-		sourceV := obj.Get("source")
-		if sourceV == nil {
-			return nil, fmt.Errorf("item %d missing source", i)
-		}
-		fact.Source, err = decodeString(sourceV)
-		if err != nil {
-			return nil, fmt.Errorf("item %d source: %v", i, err)
-		}
-		if !validFactSourceNames[fact.Source] {
-			return nil, fmt.Errorf("item %d unknown source %q", i, fact.Source)
-		}
-		if valV := obj.Get("value"); valV != nil {
-			if fact.Value, err = decodeString(valV); err != nil {
-				return nil, fmt.Errorf("item %d value: %v", i, err)
-			}
-		}
-		if repV := obj.Get("replay_value"); repV != nil {
-			if fact.ReplayValue, err = decodeString(repV); err != nil {
-				return nil, fmt.Errorf("item %d replay_value: %v", i, err)
-			}
-		}
-		if unsV := obj.Get("unsupported_reason"); unsV != nil {
-			if fact.UnsupportedReason, err = decodeString(unsV); err != nil {
-				return nil, fmt.Errorf("item %d unsupported_reason: %v", i, err)
-			}
-		}
-		// Fact objects carry at most the five contract fields, and name and
-		// source are required.
-		if obj.Len() > 5 {
-			return nil, fmt.Errorf("item %d has %d fields, want at most 5", i, obj.Len())
-		}
-		out = append(out, fact)
-	}
-	return out, nil
 }
 
 // unused keeps strconv imported only when needed by future field decoders.

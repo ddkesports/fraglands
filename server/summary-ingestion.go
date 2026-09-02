@@ -104,6 +104,9 @@ type IngestRequest struct {
 	// RevisionID is the revision claimed for the attempt. It must match the
 	// prior admission and the decoded summary.
 	RevisionID string
+	// AttemptGeneration is the attempt generation used to validate the
+	// artifact name. It must match the decoded summary's attempt generation.
+	AttemptGeneration uint64
 }
 
 // Ingest authenticates the server participant, decodes the artifact, binds
@@ -121,7 +124,7 @@ func (g *SummaryIngestionGate) Ingest(req IngestRequest) error {
 
 	// 2. Refuse traversal and unknown artifact names before touching the
 	//    payload.
-	if err := ValidateArtifactName(req.ArtifactName); err != nil {
+	if err := ValidateArtifactName(req.ArtifactName, req.AttemptGeneration); err != nil {
 		return err
 	}
 
