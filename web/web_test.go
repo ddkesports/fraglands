@@ -80,7 +80,7 @@ var (
 // newTestWeb wires one console over one orchestrator with test doubles. It
 // returns the server and the orchestrator so server-participant steps (join
 // intent consumption, result acceptance) can be driven as in production.
-func newTestWeb(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator) {
+func newTestWeb(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator, *Web) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -102,10 +102,33 @@ func newTestWeb(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator) {
 	}
 	server := httptest.NewServer(console.Handler())
 	t.Cleanup(server.Close)
-	return server, orch
+	testWebs[server.URL] = console
+	t.Cleanup(func() { delete(testWebs, server.URL) })
+	return server, orch, console
 }
 
-// login posts the credential and returns the session cookie.
+// testSessions maps server URL to credential-to-session-cookie so tests can
+// keep using credential names while the console only issues opaque cookies.
+var testSessions = map[string]map[string]*http.Cookie{}
+
+// testWebs maps server URL to the console under test, for CSRF token access.
+var testWebs = map[string]*Web{}
+
+// testSession returns the recorded session cookie for one credential on one
+// server, or nil.
+func testSession(server *httptest.Server, credential string) *http.Cookie {
+	return testSessions[server.URL][credential]
+}
+
+// recordSession stores the session cookie for one credential on one server.
+func recordSession(server *httptest.Server, credential string, cookie *http.Cookie) {
+	if testSessions[server.URL] == nil {
+		testSessions[server.URL] = map[string]*http.Cookie{}
+	}
+	testSessions[server.URL][credential] = cookie
+}
+
+// login posts the credential and records the returned opaque session cookie.
 func login(t *testing.T, server *httptest.Server, credential string) *http.Cookie {
 	t.Helper()
 	form := url.Values{"credential": {credential}}
@@ -116,11 +139,26 @@ func login(t *testing.T, server *httptest.Server, credential string) *http.Cooki
 	defer resp.Body.Close()
 	for _, cookie := range resp.Cookies() {
 		if cookie.Name == sessionCookie {
+			recordSession(server, credential, cookie)
 			return cookie
 		}
 	}
 	t.Fatalf("no session cookie after login with %q", credential)
 	return nil
+}
+
+// sessionCookieFor returns the opaque session cookie recorded for the
+// credential; tests must have logged in first.
+func sessionCookieFor(t *testing.T, server *httptest.Server, credential string) *http.Cookie {
+	t.Helper()
+	if credential == "" {
+		return nil
+	}
+	cookie := testSession(server, credential)
+	if cookie == nil {
+		t.Fatalf("no recorded session for %q; call login first", credential)
+	}
+	return cookie
 }
 
 // get performs one authenticated GET and returns the status and body.
@@ -130,8 +168,8 @@ func get(t *testing.T, server *httptest.Server, path, credential string) (int, s
 	if err != nil {
 		t.Fatal(err.Error())
 	}
-	if credential != "" {
-		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
+	if cookie := sessionCookieFor(t, server, credential); cookie != nil {
+		req.AddCookie(cookie)
 	}
 	resp, err := server.Client().Do(req)
 	if err != nil {
@@ -146,16 +184,26 @@ func get(t *testing.T, server *httptest.Server, path, credential string) (int, s
 }
 
 // postForm performs one authenticated form post following redirects is off;
-// it returns the redirect response.
+// it returns the redirect response. The per-session CSRF token is injected
+// automatically, mirroring the rendered forms.
 func postForm(t *testing.T, server *httptest.Server, path, credential string, form url.Values) *http.Response {
 	t.Helper()
+	cookie := sessionCookieFor(t, server, credential)
+	if cookie != nil && form == nil {
+		form = url.Values{}
+	}
+	if cookie != nil && form.Get("csrf_token") == "" {
+		if console := testWebs[server.URL]; console != nil {
+			form.Set("csrf_token", console.csrfTokenFor(cookie.Value))
+		}
+	}
 	req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if credential != "" {
-		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
+	if cookie != nil {
+		req.AddCookie(cookie)
 	}
 	resp, err := noRedirectClient().Do(req)
 	if err != nil {
@@ -196,7 +244,7 @@ func waitReady(t *testing.T, server *httptest.Server, credential, prepID string)
 // TestLoginFlow covers the session cookie lifecycle: refused credential
 // never sets a cookie, valid credential sets one, logout clears it.
 func TestLoginFlow(t *testing.T) {
-	server, _ := newTestWeb(t)
+	server, _, _ := newTestWeb(t)
 
 	// No session: the home page is the login form with 401.
 	code, body := get(t, server, "/", "")
@@ -225,27 +273,23 @@ func TestLoginFlow(t *testing.T) {
 	}
 	found := false
 	for _, cookie := range resp.Cookies() {
-		if cookie.Name == sessionCookie && cookie.Value == "cred-a" {
+		if cookie.Name == sessionCookie && cookie.Value != "" && cookie.Value != "cred-a" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected the session cookie after login")
+		t.Fatal("expected an opaque session cookie after login")
 	}
 
-	// Logout clears the cookie.
+	// Logout invalidates the session server-side and clears the cookie.
 	cookie := login(t, server, "cred-a")
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/logout", nil)
-	if err != nil {
-		t.Fatal(err.Error())
+	code, home := getWithCookie(t, server, "/", cookie.Value)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 on home with session, got %d", code)
 	}
-	req.AddCookie(cookie)
-	resp, err = noRedirectClient().Do(req)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-	defer resp.Body.Close()
-	for _, c := range resp.Cookies() {
+	token := extractCSRFToken(t, home)
+	resp2 := postFormWithCookie(t, server, "/logout", cookie, url.Values{"csrf_token": {token}})
+	for _, c := range resp2.Cookies() {
 		if c.Name == sessionCookie && c.MaxAge < 0 {
 			return
 		}
@@ -255,7 +299,7 @@ func TestLoginFlow(t *testing.T) {
 
 // TestReplaySelectionPage covers the private catalog and timecode form.
 func TestReplaySelectionPage(t *testing.T) {
-	server, _ := newTestWeb(t)
+	server, _, _ := newTestWeb(t)
 	login(t, server, "cred-a")
 
 	code, body := get(t, server, "/", "cred-a")
@@ -274,7 +318,7 @@ func TestReplaySelectionPage(t *testing.T) {
 // display: the omission list is shown with subjects and reasons, and the
 // fidelity badge is Preview, never Complete.
 func TestPreparationHonestPreview(t *testing.T) {
-	server, _ := newTestWeb(t)
+	server, _, _ := newTestWeb(t)
 	login(t, server, "cred-a")
 
 	// Prepare via the form.
@@ -312,7 +356,7 @@ func TestPreparationHonestPreview(t *testing.T) {
 
 // TestLobbyClaimRelease covers slot claim, the slot readback, and release.
 func TestLobbyClaimRelease(t *testing.T) {
-	server, _ := newTestWeb(t)
+	server, _, _ := newTestWeb(t)
 	login(t, server, "cred-a")
 
 	resp := postForm(t, server, "/preparations", "cred-a", url.Values{
@@ -354,7 +398,7 @@ func TestLobbyClaimRelease(t *testing.T) {
 // TestDebriefSideBySide covers the private debrief page: side-by-side
 // panels with explicit source labels, and exactly one next action.
 func TestDebriefSideBySide(t *testing.T) {
-	server, orch := newTestWeb(t)
+	server, orch, _ := newTestWeb(t)
 	login(t, server, "cred-a")
 
 	resp := postForm(t, server, "/preparations", "cred-a", url.Values{
@@ -412,7 +456,7 @@ func TestDebriefSideBySide(t *testing.T) {
 
 // TestDebriefPrivacy covers the private debrief boundary on the web surface.
 func TestDebriefPrivacy(t *testing.T) {
-	server, orch := newTestWeb(t)
+	server, orch, _ := newTestWeb(t)
 	login(t, server, "cred-a")
 	login(t, server, "cred-b")
 
@@ -441,8 +485,9 @@ func TestDebriefPrivacy(t *testing.T) {
 
 // TestPreparationAuthorization covers the web authorization boundary.
 func TestPreparationAuthorization(t *testing.T) {
-	server, _ := newTestWeb(t)
+	server, _, _ := newTestWeb(t)
 	login(t, server, "cred-a")
+	login(t, server, "cred-b")
 
 	resp := postForm(t, server, "/preparations", "cred-a", url.Values{
 		"replay_id": {"replay-1"}, "takeover_tick": {"63280"},
@@ -464,7 +509,7 @@ func TestPreparationAuthorization(t *testing.T) {
 
 // TestPrepareFormValidation covers the typed form errors.
 func TestPrepareFormValidation(t *testing.T) {
-	server, _ := newTestWeb(t)
+	server, _, _ := newTestWeb(t)
 	login(t, server, "cred-a")
 
 	// Invalid tick.
@@ -482,4 +527,93 @@ func TestPrepareFormValidation(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown replay, got %d", resp.StatusCode)
 	}
+}
+
+// TestSessionCookieOpaqueAndSecure covers blockers 1 and 2: the cookie is an
+// opaque random ID (never the raw credential), and the value is
+// cryptographically random rather than derivable from the credential.
+func TestSessionCookieOpaqueAndSecure(t *testing.T) {
+	server, _, _ := newTestWeb(t)
+
+	resp := postForm(t, server, "/login", "", url.Values{"credential": {"cred-a"}})
+	defer resp.Body.Close()
+	cookie := respCookie(t, resp, sessionCookie)
+	if cookie.Value == "cred-a" || strings.Contains(cookie.Value, "cred") {
+		t.Fatalf("cookie value must be opaque, got %q", cookie.Value)
+	}
+	if len(cookie.Value) < 32 {
+		t.Fatalf("opaque session ID too short: %q", cookie.Value)
+	}
+	if !cookie.HttpOnly {
+		t.Fatal("HttpOnly must be set on the session cookie")
+	}
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatal("SameSite=Lax expected on the session cookie")
+	}
+}
+
+// respCookie fetches one named cookie from a response.
+func respCookie(t *testing.T, resp *http.Response, name string) *http.Cookie {
+	t.Helper()
+	for _, c := range resp.Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("cookie %q not found in response", name)
+	return nil
+}
+
+// getWithCookie performs one GET with a session cookie value.
+func getWithCookie(t *testing.T, server *httptest.Server, path, cookieValue string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookieValue})
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	return resp.StatusCode, string(bodyBytes)
+}
+
+// postFormWithCookie performs one POST with a session cookie; redirects are
+// not followed so tests can assert on the redirect response itself.
+func postFormWithCookie(t *testing.T, server *httptest.Server, path string, cookie *http.Cookie, form url.Values) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// extractCSRFToken pulls the CSRF token out of a rendered page.
+func extractCSRFToken(t *testing.T, body string) string {
+	t.Helper()
+	marker := `name="csrf_token" value="`
+	idx := strings.Index(body, marker)
+	if idx == -1 {
+		t.Fatal("expected a CSRF token in the page")
+	}
+	rest := body[idx+len(marker):]
+	end := strings.Index(rest, `"`)
+	if end == -1 {
+		t.Fatal("malformed CSRF token in page")
+	}
+	return rest[:end]
 }

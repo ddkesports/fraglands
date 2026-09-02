@@ -50,6 +50,8 @@ type Orchestrator struct {
 	// admissions maps (accountID, processGeneration) to the admission record
 	// created by a successful intent consume; fences AcceptResult.
 	admissions map[admissionKey]*admission
+	// invites maps opaque invite token to its invitation.
+	invites map[string]*Invitation
 	// results keeps the private attempt results.
 	results *core.ResultStore
 	// sources is the private replay selection catalog.
@@ -80,6 +82,7 @@ func NewOrchestrator(
 		allocFailures: make(map[string]*AllocationFailure),
 		intents:       make(map[string]*core.JoinIntent),
 		admissions:    make(map[admissionKey]*admission),
+		invites:       make(map[string]*Invitation),
 		results:       core.NewResultStore(),
 		sources:       sources,
 	}
