@@ -25,8 +25,10 @@ const (
 	ErrorCodeGenerationMismatch  ErrorCode = "generation_mismatch"
 	ErrorCodeResultAlreadyTaken  ErrorCode = "result_already_accepted"
 	ErrorCodeNoResult            ErrorCode = "no_result"
+	ErrorCodeUnauthenticated     ErrorCode = "unauthenticated"
+	ErrorCodeForbidden           ErrorCode = "forbidden"
+	ErrorCodeAllocationFailed    ErrorCode = "allocation_failed"
 	ErrorCodeInvalidRequest      ErrorCode = "invalid_request"
-	ErrorCodeMethodNotAllowed    ErrorCode = "method_not_allowed"
 	ErrorCodeInternal            ErrorCode = "internal"
 )
 
@@ -53,13 +55,21 @@ var errorMap = []struct {
 	{core.ErrGenerationMismatch, apiError{ErrorCodeGenerationMismatch, http.StatusConflict}},
 	{core.ErrResultAlreadyAccepted, apiError{ErrorCodeResultAlreadyTaken, http.StatusConflict}},
 	{core.ErrNoResult, apiError{ErrorCodeNoResult, http.StatusNotFound}},
+	{orchestrator.ErrUnauthenticated, apiError{ErrorCodeUnauthenticated, http.StatusUnauthorized}},
+	{orchestrator.ErrForbidden, apiError{ErrorCodeForbidden, http.StatusForbidden}},
+	{orchestrator.ErrNoSteamIdentity, apiError{ErrorCodeInvalidRequest, http.StatusConflict}},
 	{core.ErrInvalidAccount, apiError{ErrorCodeInvalidRequest, http.StatusBadRequest}},
 	{core.ErrInvalidLobbyCapacity, apiError{ErrorCodeInvalidRequest, http.StatusBadRequest}},
 }
 
-// statusForError maps one error to its typed code and HTTP status. Unknown
-// errors map to internal with a generic message: error details never leak.
+// statusForError maps one error to its typed code and HTTP status. An
+// AllocationError preserves its typed reason code. Unknown errors map to
+// internal with a generic message: error details never leak.
 func statusForError(err error) (ErrorCode, int) {
+	var allocErr *orchestrator.AllocationError
+	if errors.As(err, &allocErr) {
+		return ErrorCodeAllocationFailed, http.StatusConflict
+	}
 	for _, m := range errorMap {
 		if errors.Is(err, m.target) {
 			return m.mapped.code, m.mapped.status

@@ -51,3 +51,33 @@ func (m *mockAllocator) Allocate(ctx context.Context, rev *core.ScenarioRevision
 	proc.MarkReady("test: process bound to port")
 	return proc, nil
 }
+
+// mockIdentityAuthority authenticates one fixed principal per credential.
+type mockIdentityAuthority struct {
+	accounts map[string]*core.Account
+}
+
+// Authenticate returns the account bound to the credential.
+func (m *mockIdentityAuthority) Authenticate(ctx context.Context, credential string) (*core.Account, error) {
+	acct, ok := m.accounts[credential]
+	if !ok {
+		return nil, ErrUnauthenticated
+	}
+	return acct, nil
+}
+
+// testAccounts returns two principals: the owner and another account.
+func testAccounts() (owner, other *core.Account) {
+	owner = &core.Account{ID: "acct-a", SteamID: 76561198000000001, DisplayName: "Owner"}
+	other = &core.Account{ID: "acct-b", SteamID: 76561198000000002, DisplayName: "Other"}
+	return owner, other
+}
+
+// testIdentityAuthority builds an authority over the two test principals.
+func testIdentityAuthority() *mockIdentityAuthority {
+	owner, other := testAccounts()
+	return &mockIdentityAuthority{accounts: map[string]*core.Account{
+		"cred-a": owner,
+		"cred-b": other,
+	}}
+}

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,7 +15,8 @@ func waitAllocated(t *testing.T, o *Orchestrator, id string) PreparationStatus {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		status, err := o.Preparation(id)
+		owner, _ := testAccounts()
+		status, err := o.Preparation(owner, id)
 		if err != nil {
 			t.Fatal(err.Error())
 		}
@@ -31,10 +33,11 @@ func TestPrepareLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1", DisplayName: "Replay One", FileName: "one.dem"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{})
+	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority())
 
-	id, err := o.Prepare("replay-1", 0, 63280)
+	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -70,13 +73,14 @@ func TestPrepareUnknownReplay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{})
+	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority())
 
-	if _, err := o.Prepare("replay-other", 0, 63280); err != ErrUnknownReplay {
+	if _, err := o.Prepare(owner, "replay-other", 0, 63280); err != ErrUnknownReplay {
 		t.Fatalf("expected ErrUnknownReplay, got %v", err)
 	}
-	if _, err := o.Preparation("prep-1"); err != ErrUnknownPreparation {
+	if _, err := o.Preparation(owner, "prep-1"); err != ErrUnknownPreparation {
 		t.Fatalf("expected ErrUnknownPreparation, got %v", err)
 	}
 }
@@ -85,10 +89,11 @@ func TestPrepareFailureTypedReason(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{fail: true}, &mockAllocator{})
+	o := NewOrchestrator(ctx, sources, &mockPreparer{fail: true}, &mockAllocator{}, testIdentityAuthority())
 
-	id, err := o.Prepare("replay-1", 0, 63280)
+	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -101,7 +106,7 @@ func TestPrepareFailureTypedReason(t *testing.T) {
 		t.Fatalf("expected failed, got %s", state)
 	}
 
-	status, err := o.Preparation(id)
+	status, err := o.Preparation(owner, id)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -120,10 +125,11 @@ func TestPrepareAllocationFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{fail: true})
+	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{fail: true}, testIdentityAuthority())
 
-	id, err := o.Prepare("replay-1", 0, 63280)
+	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -138,4 +144,10 @@ func TestPrepareAllocationFailure(t *testing.T) {
 	if status.Process != nil {
 		t.Fatal("failed allocation must not leave a process")
 	}
+}
+
+// errorsAs is a small indirection so tests read without importing errors in
+// every file.
+func errorsAs(err error, target any) bool {
+	return errors.As(err, target)
 }

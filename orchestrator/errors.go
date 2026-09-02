@@ -13,4 +13,13 @@ var (
 	// ErrProcessNotReady is returned when a join intent is requested before
 	// the server process readiness is proven, or after its allocation failed.
 	ErrProcessNotReady = errors.New("orchestrator: server process not ready")
+	// ErrUnauthenticated is returned when no authenticated principal is
+	// presented to an operation that requires one.
+	ErrUnauthenticated = errors.New("orchestrator: unauthenticated")
+	// ErrForbidden is returned when the authenticated principal is not the
+	// preparation owner or a claimed participant.
+	ErrForbidden = errors.New("orchestrator: forbidden")
+	// ErrNoSteamIdentity is returned when an operation needs the principal's
+	// bound Steam identity and the account has none.
+	ErrNoSteamIdentity = errors.New("orchestrator: account has no bound steam identity")
 )

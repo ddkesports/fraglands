@@ -1,8 +1,9 @@
 // Package orchestrator coordinates the minimal Fraglands path: scenario
 // preparation, server process allocation, lobby slot claims, one-use join
 // intents, and private results. It owns no game state and never interprets
-// replay content: the injected Preparer builds revisions, and the injected
-// ProcessAllocator starts server processes and proves their readiness.
+// replay content: the injected Preparer builds revisions, the injected
+// ProcessAllocator starts server processes and proves their readiness, and
+// the injected IdentityAuthority derives identities from credentials.
 package orchestrator
 
 import (
@@ -19,6 +20,8 @@ type Orchestrator struct {
 	preparer Preparer
 	// allocator starts one server process per ready revision.
 	allocator ProcessAllocator
+	// identities authenticates credentials into accounts.
+	identities IdentityAuthority
 	// ctx is the orchestrator lifetime: preparation and allocation watchers
 	// stop when it is cancelled.
 	ctx context.Context
@@ -31,6 +34,8 @@ type Orchestrator struct {
 	intentSeq int
 	// preparations maps preparation ID to its lifecycle record.
 	preparations map[string]*core.ScenarioPreparation
+	// owners maps preparation ID to the account ID that requested it.
+	owners map[string]string
 	// lobbies maps preparation ID to its lobby.
 	lobbies map[string]*core.Lobby
 	// processes maps preparation ID to its allocated server process.
@@ -54,12 +59,15 @@ func NewOrchestrator(
 	sources []core.ReplaySource,
 	preparer Preparer,
 	allocator ProcessAllocator,
+	identities IdentityAuthority,
 ) *Orchestrator {
 	return &Orchestrator{
 		ctx:           ctx,
 		preparer:      preparer,
 		allocator:     allocator,
+		identities:    identities,
 		preparations:  make(map[string]*core.ScenarioPreparation),
+		owners:        make(map[string]string),
 		lobbies:       make(map[string]*core.Lobby),
 		processes:     make(map[string]*AllocatedProcess),
 		allocFailures: make(map[string]*AllocationFailure),
