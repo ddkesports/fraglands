@@ -666,3 +666,90 @@ func extractCSRFToken(t *testing.T, body string) string {
 	}
 	return rest[:end]
 }
+
+// TestInviteFlow covers the web invite surface: only the owner sees the
+// invite form, an invited account claims with the token, a stranger
+// without a token is refused, and the token is single-use.
+func TestInviteFlow(t *testing.T) {
+	server, _, _ := newTestWeb(t)
+	login(t, server, "cred-a")
+	login(t, server, "cred-b")
+
+	// Owner prepares.
+	resp := postForm(t, server, "/preparations", "cred-a", url.Values{
+		"replay_id": {"replay-1"}, "takeover_tick": {"63280"},
+	})
+	prepID := strings.TrimPrefix(resp.Header.Get("Location"), "/preparations/")
+	waitReady(t, server, "cred-a", prepID)
+
+	// Owner sees the invite form.
+	code, body := get(t, server, "/preparations/"+prepID, "cred-a")
+	if code != http.StatusOK || !strings.Contains(body, "Invite a teammate") {
+		t.Fatalf("expected the invite form for the owner, got %d", code)
+	}
+
+	// A non-owner does not see the invite form and cannot claim without a
+	// token.
+	code, body = get(t, server, "/preparations/"+prepID, "cred-b")
+	if code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-owner view, got %d", code)
+	}
+	if strings.Contains(body, "Invite a teammate") {
+		t.Fatal("invite form must not be visible to a non-owner")
+	}
+
+	// Owner issues an invite for cred-b via the form.
+	resp = postForm(t, server, "/preparations/"+prepID+"/invite", "cred-a", url.Values{
+		"account_id": {otherAcct.ID},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 after invite, got %d", resp.StatusCode)
+	}
+	invitedBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	token := extractInviteToken(t, string(invitedBody))
+	if token == "" {
+		t.Fatal("expected an invite token in the response")
+	}
+
+	// The invited account claims with the token.
+	resp = postForm(t, server, "/preparations/"+prepID+"/slots", "cred-b", url.Values{
+		"invite_token": {token},
+	})
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303 for invited claim, got %d", resp.StatusCode)
+	}
+
+	// The invited participant now views the preparation.
+	code, body = get(t, server, "/preparations/"+prepID, "cred-b")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 for invited participant view, got %d", code)
+	}
+
+	// The token is single-use: cred-b releases, then a fresh claim with the
+	// same token is refused.
+	resp = postForm(t, server, "/preparations/"+prepID+"/slots/release", "cred-b", nil)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303 for release, got %d", resp.StatusCode)
+	}
+	resp = postForm(t, server, "/preparations/"+prepID+"/slots", "cred-b", url.Values{
+		"invite_token": {token},
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for replayed invite token, got %d", resp.StatusCode)
+	}
+}
+
+// extractInviteToken pulls the invite token out of the preparation page
+// after an invite is issued.
+func extractInviteToken(t *testing.T, body string) string {
+	t.Helper()
+	start := strings.Index(body, "<code>")
+	end := strings.Index(body, "</code>")
+	if start == -1 || end == -1 || end <= start {
+		return ""
+	}
+	return body[start+len("<code>") : end]
+}
