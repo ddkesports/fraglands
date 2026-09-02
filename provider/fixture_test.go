@@ -2,11 +2,21 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"testing"
 
 	"github.com/paralin/fraglands/core"
 	"github.com/paralin/s2replay/analysis"
+)
+
+// pinnedDemoSize and pinnedDemoSHA256 are the exact byte identity of the
+// canonical pinned demo (101514223.dem). The fixture refuses to parse any
+// other bytes: a wrong file fails immediately, before the parser runs.
+const (
+	pinnedDemoSize   = 211730538
+	pinnedDemoSHA256 = "b612e43f4055d4dde728c7eedbdd7ec38c3478ef90f33b870bfb29310b79194f"
 )
 
 // TestOptInPinnedReplayProvider runs the full provider path against the
@@ -31,6 +41,18 @@ func TestOptInPinnedReplayProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Identity gate before any parsing: exact byte length and SHA256. Wrong
+	// bytes fail immediately with the observed values in the message.
+	if len(data) != pinnedDemoSize {
+		t.Fatalf("pinned demo size mismatch: got %d bytes, want %d", len(data), pinnedDemoSize)
+	}
+	digest := sha256.Sum256(data)
+	gotSHA := hex.EncodeToString(digest[:])
+	if gotSHA != pinnedDemoSHA256 {
+		t.Fatalf("pinned demo sha256 mismatch: got %s, want %s", gotSHA, pinnedDemoSHA256)
+	}
+	t.Logf("pinned demo identity verified: %d bytes, sha256 %s", len(data), gotSHA)
 
 	store := newFakeStore()
 	store.add("replay-1", data)
@@ -115,4 +137,5 @@ func TestOptInPinnedReplayProvider(t *testing.T) {
 	t.Logf("tick_interval=%v mid_boss=%s towers=%d walkers=%d transients=%d",
 		facts.TickProvenance.TickIntervalSeconds.Value, objs.MidBoss.ClassName,
 		len(objs.Towers), len(objs.Walkers), len(objs.Transients))
+	t.Logf("final source digest: sha256=%s bytes=%d", gotSHA, len(data))
 }
