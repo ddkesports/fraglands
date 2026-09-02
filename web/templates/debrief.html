@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fraglands &mdash; Debrief</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem;color:#1a1a2e}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1rem}
+.panel{border:1px solid #ccc;padding:.75rem 1rem}
+.panel h3{margin:.2rem 0 .6rem;font-size:1rem}
+.source-label{display:inline-block;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;background:#555;color:#fff;padding:.1rem .45rem;border-radius:.2rem;margin-bottom:.4rem}
+dl{display:grid;grid-template-columns:9rem 1fr;gap:.25rem .6rem;font-size:.95rem}
+dt{color:#555}
+dd{margin:0}
+.omissions{background:#fff7e6;border:1px solid #e6c98a;padding:.75rem 1rem;margin-top:1rem}
+.next{margin-top:1.5rem;padding:.75rem 1rem;background:#e8f0fe;border:1px solid #aecbfa}
+button{padding:.45rem 1rem;cursor:pointer}
+</style>
+</head>
+<body>
+<h1>Private debrief</h1>
+<div class="compare">
+<div class="panel">
+<span class="source-label">Source: replay</span>
+<dl>
+<dt>Replay</dt><dd>{{.Result.ReplayID}}</dd>
+<dt>Takeover tick</dt><dd>{{.Result.TakeoverTick}}</dd>
+<dt>Revision</dt><dd>{{.Result.RevisionID}}</dd>
+</dl>
+</div>
+<div class="panel">
+<span class="source-label">Source: server attempt</span>
+<dl>
+<dt>Result</dt><dd>{{.Result.ID}}</dd>
+<dt>Process generation</dt><dd>{{.Result.ProcessGeneration}}</dd>
+<dt>Attempt generation</dt><dd>{{.Result.AttemptGeneration}}</dd>
+</dl>
+</div>
+</div>
+
+{{if .Omissions}}
+<div class="omissions">
+<h3>Omitted from this reconstruction</h3>
+<p>The attempt ran as a Reconstruction Preview without these fields:</p>
+<ul>
+{{range .Omissions}}
+<li><strong>{{.Subject}}</strong> &mdash; {{.Kind}}{{if .Reason}}: {{.Reason}}{{end}}</li>
+{{end}}
+</ul>
+</div>
+{{end}}
+
+<div class="next">
+<strong>Next action:</strong> prepare the next replay moment from your selection list.
+<form method="get" action="/"><button type="submit">Select next replay</button></form>
+</div>
+</body>
+</html>

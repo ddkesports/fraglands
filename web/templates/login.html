@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fraglands &mdash; Sign in</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:24rem;margin:4rem auto;padding:0 1rem;color:#1a1a2e}
+form{display:flex;flex-direction:column;gap:.75rem}
+input,button{padding:.5rem;font-size:1rem}
+button{cursor:pointer}
+.message{color:#b00020}
+</style>
+</head>
+<body>
+<h1>Fraglands</h1>
+<p>Private reconstruction console. Sign in with your credential.</p>
+{{if .Message}}<p class="message">{{.Message}}</p>{{end}}
+<form method="post" action="/login">
+<label for="credential">Credential</label>
+<input type="password" id="credential" name="credential" autofocus autocomplete="current-password">
+<button type="submit">Sign in</button>
+</form>
+</body>
+</html>

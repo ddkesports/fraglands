@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fraglands &mdash; Replay selection</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;color:#1a1a2e}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}
+form{display:flex;gap:.5rem;align-items:center}
+input{width:9rem;padding:.35rem}
+button{padding:.35rem .8rem;cursor:pointer}
+header{display:flex;justify-content:space-between;align-items:baseline}
+</style>
+</head>
+<body>
+<header>
+<h1>Replay selection</h1>
+<span>{{.Account}} &middot; <form method="post" action="/logout" style="display:inline"><button type="submit">Sign out</button></form></span>
+</header>
+<p>Pick one replay and the takeover tick (the moment input unlocks). The lead-in window is derived from the replay itself.</p>
+<table>
+<tr><th>Replay</th><th>File</th><th>Takeover tick</th><th></th></tr>
+{{range .Replays}}
+<tr>
+<td>{{.DisplayName}}</td>
+<td>{{.FileName}}</td>
+<td>
+<form method="post" action="/preparations">
+<input type="hidden" name="replay_id" value="{{.ID}}">
+<input type="number" name="takeover_tick" min="1" placeholder="tick" required>
+<button type="submit">Prepare</button>
+</form>
+</td>
+</tr>
+{{end}}
+</table>
+</body>
+</html>

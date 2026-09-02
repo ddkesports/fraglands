@@ -47,8 +47,10 @@ func encodeReplay(a *fastjson.Arena, src core.ReplaySource) *fastjson.Value {
 	return v
 }
 
-// encodePreparation encodes the explicit preparation status readback.
-func encodePreparation(a *fastjson.Arena, status orchestrator.PreparationStatus) *fastjson.Value {
+// encodePreparation encodes the explicit preparation status readback for the
+// requesting principal. The principal's own slot is read back so the caller
+// can show the reservation it holds without a second request.
+func encodePreparation(a *fastjson.Arena, status orchestrator.PreparationStatus, principal *core.Account) *fastjson.Value {
 	prep := status.Preparation
 	v := a.NewObject()
 	v.Set("id", a.NewString(prep.ID))
@@ -57,10 +59,15 @@ func encodePreparation(a *fastjson.Arena, status orchestrator.PreparationStatus)
 	v.Set("takeover_tick", a.NewString(fmt.Sprintf("%d", prep.TakeoverTick)))
 	v.Set("state", a.NewString(prep.State().String()))
 
-	// Lobby readback.
+	// Lobby readback: capacity, occupancy, and the principal's own slot.
 	lobby := a.NewObject()
 	lobby.Set("capacity", a.NewNumberInt(status.Lobby.Capacity))
 	lobby.Set("occupied", a.NewNumberInt(status.Lobby.Occupied()))
+	if slot, ok := status.Lobby.Slot(principal.ID); ok {
+		lobby.Set("slot", a.NewNumberInt(slot))
+	} else {
+		lobby.Set("slot", a.NewNull())
+	}
 	v.Set("lobby", lobby)
 
 	// Process readback: generation, connect address, and readiness evidence.
@@ -110,6 +117,7 @@ func encodeRevision(a *fastjson.Arena, revision *core.ScenarioRevision) *fastjso
 	v.Set("lead_in_start_tick", a.NewString(fmt.Sprintf("%d", revision.LeadInStartTick)))
 	v.Set("takeover_tick", a.NewString(fmt.Sprintf("%d", revision.TakeoverTick)))
 	v.Set("fidelity", a.NewString(revision.Fidelity.String()))
+	v.Set("omissions", encodeOmissions(a, revision.Omissions))
 	return v
 }
 
@@ -119,6 +127,29 @@ func encodeFailure(a *fastjson.Arena, failure *core.FailureReason) *fastjson.Val
 	v.Set("code", a.NewString(failure.Code))
 	v.Set("message", a.NewString(failure.Message))
 	return v
+}
+
+// encodeOmission encodes one typed omission from compilation.
+func encodeOmission(a *fastjson.Arena, o core.Omission) *fastjson.Value {
+	v := a.NewObject()
+	v.Set("kind", a.NewString(string(o.Kind)))
+	v.Set("subject", a.NewString(o.Subject))
+	if o.Required {
+		v.Set("required", a.NewTrue())
+	} else {
+		v.Set("required", a.NewFalse())
+	}
+	v.Set("reason", a.NewString(o.Reason))
+	return v
+}
+
+// encodeOmissions encodes the typed omission list; empty for Complete.
+func encodeOmissions(a *fastjson.Arena, omissions []core.Omission) *fastjson.Value {
+	arr := a.NewArray()
+	for i, o := range omissions {
+		arr.SetArrayItem(i, encodeOmission(a, o))
+	}
+	return arr
 }
 
 // encodeJoinIntent encodes one join target: the intent facts and the
