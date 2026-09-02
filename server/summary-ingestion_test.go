@@ -430,10 +430,11 @@ func TestIngestionGateConcurrentDistinct(t *testing.T) {
 	errs := make(chan error, workers)
 	for i := 0; i < workers; i++ {
 		go func(n int) {
-			data := patchSummaryJSON(t, `"attempt_generation":3`, `"attempt_generation":`+itoa(n+100))
+			gen := uint64(n + 100)
+			data := patchSummaryJSON(t, `"attempt_generation":3`, `"attempt_generation":`+itoa(int(gen)))
 			errs <- g.Ingest(IngestRequest{
-				Credential: "scred-a", ArtifactName: artifactNameFor(3),
-				Data: data, AccountID: "acct-a", AttemptGeneration: 3,
+				Credential: "scred-a", ArtifactName: artifactNameFor(gen),
+				Data: data, AccountID: "acct-a", AttemptGeneration: gen,
 			})
 		}(i)
 	}
