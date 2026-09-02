@@ -81,24 +81,62 @@ func (o *Orchestrator) IssueJoinIntent(principal *core.Account, prepID string) (
 	return &JoinTarget{Process: status.Process, Intent: intent}, nil
 }
 
-// ConsumeJoinIntent consumes a one-use intent. The server participant calls
-// this when the client presents at the server: a consumed, mismatched, or
-// stale intent is refused.
-func (o *Orchestrator) ConsumeJoinIntent(intentID string, revisionID string, generation uint64, steamID core.SteamID) error {
-	intent := o.intentFor(intentID)
+// ConsumeJoinIntent consumes a one-use intent for an authenticated server
+// participant. The participant presents the intent facts when the client
+// presents at the server: the process generation is the participant's own
+// bound generation, never a caller-supplied value. A consumed, mismatched,
+// stale, or wrong-process intent is refused and never burned. A successful
+// consume records the account admission on the process generation so result
+// acceptance is later fenced to admitted accounts only.
+func (o *Orchestrator) ConsumeJoinIntent(participant *ServerParticipant, intentID string, revisionID string, steamID core.SteamID) error {
+	if participant == nil {
+		return ErrUnauthenticated
+	}
+
+	var (
+		intent *core.JoinIntent
+		known  bool
+	)
+	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
+		intent = o.intents[intentID]
+		if intent == nil {
+			return
+		}
+		// The intent must belong to this server process generation: a
+		// participant cannot consume an intent issued for another process.
+		if intent.Generation != participant.ProcessGeneration {
+			return
+		}
+		known = true
+	})
 	if intent == nil {
 		return ErrUnknownIntent
 	}
-	return intent.Consume(revisionID, generation, steamID)
-}
+	if !known {
+		return ErrWrongProcessGeneration
+	}
 
-// intentFor returns the intent by ID, or nil.
-func (o *Orchestrator) intentFor(id string) *core.JoinIntent {
-	var intent *core.JoinIntent
-	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
-		intent = o.intents[id]
+	// One-use consumption under the intent owner lock: a refused consume
+	// never marks the intent used.
+	if err := intent.Consume(revisionID, participant.ProcessGeneration, steamID); err != nil {
+		return err
+	}
+
+	// Record the admission: this account may present results on this
+	// process generation against this revision, and nothing else.
+	record := &admission{
+		accountID:         intent.AccountID,
+		revisionID:        intent.RevisionID,
+		processGeneration: intent.Generation,
+	}
+	o.bcast.HoldLock(func(broadcast func(), _ func() <-chan struct{}) {
+		o.admissions[admissionKey{
+			accountID:         record.accountID,
+			processGeneration: record.processGeneration,
+		}] = record
+		broadcast()
 	})
-	return intent
+	return nil
 }
 
 // nextIntentID allocates a unique intent identifier.

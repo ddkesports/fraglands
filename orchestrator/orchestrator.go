@@ -22,6 +22,8 @@ type Orchestrator struct {
 	allocator ProcessAllocator
 	// identities authenticates credentials into accounts.
 	identities IdentityAuthority
+	// servers authenticates server process credentials.
+	servers ServerAuthority
 	// ctx is the orchestrator lifetime: preparation and allocation watchers
 	// stop when it is cancelled.
 	ctx context.Context
@@ -45,6 +47,9 @@ type Orchestrator struct {
 	allocFailures map[string]*AllocationFailure
 	// intents maps join intent ID to the intent.
 	intents map[string]*core.JoinIntent
+	// admissions maps (accountID, processGeneration) to the admission record
+	// created by a successful intent consume; fences AcceptResult.
+	admissions map[admissionKey]*admission
 	// results keeps the private attempt results.
 	results *core.ResultStore
 	// sources is the private replay selection catalog.
@@ -60,18 +65,21 @@ func NewOrchestrator(
 	preparer Preparer,
 	allocator ProcessAllocator,
 	identities IdentityAuthority,
+	servers ServerAuthority,
 ) *Orchestrator {
 	return &Orchestrator{
 		ctx:           ctx,
 		preparer:      preparer,
 		allocator:     allocator,
 		identities:    identities,
+		servers:       servers,
 		preparations:  make(map[string]*core.ScenarioPreparation),
 		owners:        make(map[string]string),
 		lobbies:       make(map[string]*core.Lobby),
 		processes:     make(map[string]*AllocatedProcess),
 		allocFailures: make(map[string]*AllocationFailure),
 		intents:       make(map[string]*core.JoinIntent),
+		admissions:    make(map[admissionKey]*admission),
 		results:       core.NewResultStore(),
 		sources:       sources,
 	}

@@ -22,4 +22,10 @@ var (
 	// ErrNoSteamIdentity is returned when an operation needs the principal's
 	// bound Steam identity and the account has none.
 	ErrNoSteamIdentity = errors.New("orchestrator: account has no bound steam identity")
+	// ErrWrongProcessGeneration is returned when a server participant tries
+	// to consume an intent issued for a different process generation.
+	ErrWrongProcessGeneration = errors.New("orchestrator: intent bound to different process generation")
+	// ErrUnadmittedAccount is returned when a result is submitted for an
+	// account that never consumed an intent on this process generation.
+	ErrUnadmittedAccount = errors.New("orchestrator: account not admitted on this process generation")
 )
