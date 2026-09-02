@@ -149,6 +149,7 @@ func (w *Web) Handler() http.Handler {
 	mux.HandleFunc("POST /preparations", w.requireSessionCSRF(w.handlePrepare))
 	mux.HandleFunc("GET /preparations/{id}", w.requirePrincipal(w.handlePreparation))
 	mux.HandleFunc("POST /preparations/{id}/slots", w.requireSessionCSRF(w.handleClaim))
+	mux.HandleFunc("POST /preparations/{id}/invite", w.requireSessionCSRF(w.handleInvite))
 	mux.HandleFunc("POST /preparations/{id}/slots/release", w.requireSessionCSRF(w.handleRelease))
 	mux.HandleFunc("GET /debrief", w.requirePrincipal(w.handleDebrief))
 	return mux

@@ -59,6 +59,10 @@ button{padding:.45rem 1rem;cursor:pointer}
 {{if .CanInvite}}
 <div class="invite">
 <h3>Invite a teammate</h3>
+{{if .InviteToken}}
+<p>Invitation issued for <strong>{{.InviteFor}}</strong>. Pass this token to them out of band; it is single-use and shown once:</p>
+<code>{{.InviteToken}}</code>
+{{end}}
 <form method="post" action="/preparations/{{.ID}}/invite">
 <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
 <input type="text" name="account_id" placeholder="Account ID" required>
