@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fraglands &mdash; Preparation {{.ID}}</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem;color:#1a1a2e}
+dl{display:grid;grid-template-columns:10rem 1fr;gap:.3rem .8rem}
+dt{font-weight:600;color:#555}
+dd{margin:0}
+.omissions{background:#fff7e6;border:1px solid #e6c98a;padding:.75rem 1rem;margin-top:1rem}
+.omissions h3{margin:.2rem 0 .5rem}
+.omissions li{margin:.2rem 0}
+.preview-badge{display:inline-block;background:#e6a23c;color:#fff;padding:.1rem .5rem;border-radius:.2rem;font-size:.85rem}
+.complete-badge{display:inline-block;background:#2e7d32;color:#fff;padding:.1rem .5rem;border-radius:.2rem;font-size:.85rem}
+.actions{margin-top:1.5rem;display:flex;gap:.75rem;flex-wrap:wrap}
+button{padding:.45rem 1rem;cursor:pointer}
+.failure{background:#fdecea;border:1px solid #e57373;padding:.75rem 1rem;margin-top:1rem}
+</style>
+</head>
+<body>
+<h1>Preparation {{.ID}}</h1>
+<dl>
+<dt>Replay</dt><dd>{{.Replay}}</dd>
+<dt>Takeover tick</dt><dd>{{.Tick}}</dd>
+<dt>State</dt><dd>{{.State}}</dd>
+{{if .RevisionID}}<dt>Revision</dt><dd>{{.RevisionID}}</dd>{{end}}
+{{if .Fidelity}}<dt>Fidelity</dt><dd>{{if eq .Fidelity "preview"}}<span class="preview-badge">Reconstruction Preview</span>{{else}}<span class="complete-badge">Complete</span>{{end}}</dd>{{end}}
+{{if .Lobby}}<dt>Lobby</dt><dd>{{.Lobby.Occupied}} / {{.Lobby.Capacity}} slots{{if .Lobby.HasSlot}} &mdash; your slot: {{.Lobby.MySlot}}{{end}}</dd>{{end}}
+{{if .Process}}<dt>Server process</dt><dd>generation {{.Process.Generation}} &middot; {{.Process.Address}}{{if .Process.Ready}} &middot; ready{{end}}</dd>
+{{if .Process.Evidence}}<dt>Readiness evidence</dt><dd>{{.Process.Evidence}}</dd>{{end}}{{end}}
+</dl>
+
+{{if .Omissions}}
+<div class="omissions">
+<h3>Omitted from this reconstruction</h3>
+<p>These fields were present in the replay but are not reconstructed. The attempt runs without them; results are honest but partial.</p>
+<ul>
+{{range .Omissions}}
+<li><strong>{{.Subject}}</strong> &mdash; {{.Kind}}{{if .Required}} (required){{end}}{{if .Reason}}: {{.Reason}}{{end}}</li>
+{{end}}
+</ul>
+</div>
+{{end}}
+
+{{if .Failure}}
+<div class="failure">
+<strong>Preparation failed:</strong> {{.Failure.Code}} &mdash; {{.Failure.Message}}
+</div>
+{{end}}
+
+{{if .AllocFailure}}
+<div class="failure">
+<strong>Server allocation failed:</strong> {{.AllocFailure.Code}} &mdash; {{.AllocFailure.Message}}
+</div>
+{{end}}
+
+<div class="actions">
+{{if .Lobby}}
+{{if .Lobby.HasSlot}}
+<form method="post" action="/preparations/{{.ID}}/slots/release"><button type="submit">Release my slot</button></form>
+{{else}}
+<form method="post" action="/preparations/{{.ID}}/slots"><button type="submit">Claim a lobby slot</button></form>
+{{end}}
+{{end}}
+<a href="/">Back to selection</a>
+</div>
+</body>
+</html>

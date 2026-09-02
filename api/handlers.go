@@ -73,7 +73,7 @@ func (a *API) handlePreparation(w http.ResponseWriter, r *http.Request, principa
 	}
 	var arena fastjson.Arena
 	defer arena.Reset()
-	writeJSON(w, http.StatusOK, encodePreparation(&arena, status))
+	writeJSON(w, http.StatusOK, encodePreparation(&arena, status, principal))
 }
 
 // handleClaim reserves one lobby slot for the principal.
