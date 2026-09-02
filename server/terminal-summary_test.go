@@ -120,6 +120,55 @@ func TestParseTerminalSummaryRefusals(t *testing.T) {
 	}
 }
 
+func TestParseTerminalSummaryDuplicateFields(t *testing.T) {
+	// Every wire field, duplicated in the artifact. The contract is an
+	// immutable versioned record: a repeated key means the artifact was
+	// tampered with or written by a different writer, so every duplicate
+	// is a refusal with no partial summary, regardless of the field's
+	// security relevance.
+	dupes := []struct {
+		name    string
+		literal string
+	}{
+		{"version", `"version":"runback-attempt/v1"`},
+		{"replay_identity", `"replay_identity":"replay-101514223"`},
+		{"revision", `"revision":"rev-7"`},
+		{"server_process_generation", `"server_process_generation":7`},
+		{"attempt_generation", `"attempt_generation":3`},
+		{"takeover_tick", `"takeover_tick":63280`},
+		{"ending", `"ending":"secure"`},
+		{"ended_at_seconds", `"ended_at_seconds":200`},
+	}
+	for _, tc := range dupes {
+		data := patchSummaryJSON(t, `"ended_at_seconds":200}`, `"ended_at_seconds":200,`+tc.literal+`}`)
+		s, err := ParseTerminalSummaryArtifact(data)
+		if err == nil {
+			t.Errorf("duplicate %s: expected refusal, got summary %+v", tc.name, s)
+			continue
+		}
+		if s != nil {
+			t.Errorf("duplicate %s: refusal must not carry a partial summary", tc.name)
+		}
+		if !errors.Is(err, ErrSummaryMalformed) {
+			t.Errorf("duplicate %s: expected ErrSummaryMalformed, got %v", tc.name, err)
+		}
+	}
+
+	// A duplicate adjacent to its original is refused the same way: key
+	// position inside the object must not matter.
+	adjacent := patchSummaryJSON(t, `"revision":"rev-7",`, `"revision":"rev-7","revision":"rev-7",`)
+	s, err := ParseTerminalSummaryArtifact(adjacent)
+	if err == nil {
+		t.Fatalf("adjacent duplicate revision: expected refusal, got summary %+v", s)
+	}
+	if s != nil {
+		t.Fatal("adjacent duplicate revision: refusal must not carry a partial summary")
+	}
+	if !errors.Is(err, ErrSummaryMalformed) {
+		t.Fatalf("adjacent duplicate revision: expected ErrSummaryMalformed, got %v", err)
+	}
+}
+
 func TestParseTerminalSummaryOversize(t *testing.T) {
 	if err := CheckArtifactSize(MaxTerminalSummaryBytes + 1); err == nil {
 		t.Fatal("expected oversize refusal")
