@@ -15,9 +15,17 @@ type JoinTarget struct {
 }
 
 // IssueJoinIntent validates the preparation is ready and the server process
-// ready, then issues a one-use join intent bound to the revision, process
-// generation, and Steam identity. The account must hold a lobby slot.
-func (o *Orchestrator) IssueJoinIntent(prepID, accountID string, steamID core.SteamID) (*JoinTarget, error) {
+// ready, then issues a one-use join intent for the authenticated principal,
+// bound to the revision, process generation, and the principal's immutable
+// Steam identity. The account must hold a lobby slot.
+func (o *Orchestrator) IssueJoinIntent(principal *core.Account, prepID string) (*JoinTarget, error) {
+	if principal == nil {
+		return nil, ErrUnauthenticated
+	}
+	if principal.SteamID == 0 {
+		return nil, ErrNoSteamIdentity
+	}
+
 	var (
 		status PreparationStatus
 		found  bool
@@ -47,7 +55,7 @@ func (o *Orchestrator) IssueJoinIntent(prepID, accountID string, steamID core.St
 	// An allocation failure is a typed launch failure: surface its reason and
 	// never admit a join against a failed allocation.
 	if failure := status.AllocationFailure; failure != nil {
-		return nil, fmt.Errorf("%s: %s", failure.Reason.Code, failure.Reason.Message)
+		return nil, &AllocationError{Reason: failure.Reason}
 	}
 	if status.Process == nil || !status.Process.Ready() {
 		return nil, ErrProcessNotReady
@@ -55,16 +63,17 @@ func (o *Orchestrator) IssueJoinIntent(prepID, accountID string, steamID core.St
 
 	// The account must hold a lobby slot: no slot, no join.
 	if status.Lobby != nil {
-		if _, ok := status.Lobby.Slot(accountID); !ok {
+		if _, ok := status.Lobby.Slot(principal.ID); !ok {
 			return nil, core.ErrNoSlotClaimed
 		}
 	}
 
-	// Bind the intent to the revision and process generation.
+	// Bind the intent to the revision, process generation, and the
+	// principal's immutable Steam identity: never a client-supplied value.
 	revision := status.Preparation.Revision()
 	generation := status.Process.Generation
 	intentID := o.nextIntentID()
-	intent := core.NewJoinIntent(intentID, accountID, steamID, revision.ID, generation)
+	intent := core.NewJoinIntent(intentID, principal.ID, principal.SteamID, revision.ID, generation)
 
 	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
 		o.intents[intentID] = intent

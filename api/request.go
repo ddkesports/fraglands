@@ -27,6 +27,9 @@ func readRequestJSON(r *http.Request) (map[string]any, error) {
 	if len(body) > maxRequestBytes {
 		return nil, errInvalidBody
 	}
+	if len(body) == 0 {
+		return map[string]any{}, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var out map[string]any

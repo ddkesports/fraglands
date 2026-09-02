@@ -8,13 +8,18 @@ import (
 )
 
 // Prepare accepts one preparation request for a replay in the selection
-// catalog. It creates the queued preparation, starts the preparer on its own
-// goroutine, and returns the preparation ID immediately: status is read
-// through Preparation.
+// catalog, owned by the authenticated principal. It creates the queued
+// preparation, starts the preparer on its own goroutine, and returns the
+// preparation ID immediately: status is read through Preparation.
 func (o *Orchestrator) Prepare(
+	principal *core.Account,
 	replayID string,
 	leadInStartTick, takeoverTick uint32,
 ) (string, error) {
+	if principal == nil {
+		return "", ErrUnauthenticated
+	}
+
 	var id string
 	var accepted bool
 	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
@@ -31,6 +36,7 @@ func (o *Orchestrator) Prepare(
 		id = prepID(o.prepSeq)
 		prep := core.NewScenarioPreparation(id, replayID, leadInStartTick, takeoverTick)
 		o.preparations[id] = prep
+		o.owners[id] = principal.ID
 		lobby, _ := core.NewLobby("lobby-"+id, defaultLobbyCapacity)
 		o.lobbies[id] = lobby
 	})
@@ -54,17 +60,27 @@ func (o *Orchestrator) Sources() []core.ReplaySource {
 	return out
 }
 
-// Preparation returns the explicit status for one preparation, or
-// ErrUnknownPreparation.
-func (o *Orchestrator) Preparation(id string) (PreparationStatus, error) {
-	var status PreparationStatus
-	var found bool
+// Preparation returns the explicit status for one preparation when the
+// principal is the preparation owner or a claimed participant, or
+// ErrUnknownPreparation for an unknown preparation and ErrForbidden
+// otherwise. Connect address and readiness facts stay behind this check.
+func (o *Orchestrator) Preparation(principal *core.Account, id string) (PreparationStatus, error) {
+	if principal == nil {
+		return PreparationStatus{}, ErrUnauthenticated
+	}
+
+	var (
+		status  PreparationStatus
+		found   bool
+		allowed bool
+	)
 	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
 		prep, ok := o.preparations[id]
 		if !ok {
 			return
 		}
 		found = true
+		allowed = o.canViewLocked(principal.ID, id)
 		status = PreparationStatus{
 			Preparation:       prep,
 			Lobby:             o.lobbies[id],
@@ -75,7 +91,25 @@ func (o *Orchestrator) Preparation(id string) (PreparationStatus, error) {
 	if !found {
 		return status, ErrUnknownPreparation
 	}
+	if !allowed {
+		return PreparationStatus{}, ErrForbidden
+	}
 	return status, nil
+}
+
+// canViewLocked reports whether the account may view the preparation
+// status: the owner or any account holding a lobby slot. Callers must hold
+// the bcast lock.
+func (o *Orchestrator) canViewLocked(accountID, prepID string) bool {
+	if o.owners[prepID] == accountID {
+		return true
+	}
+	lobby := o.lobbies[prepID]
+	if lobby == nil {
+		return false
+	}
+	_, ok := lobby.Slot(accountID)
+	return ok
 }
 
 // runPreparer drives one preparation to a terminal state, then allocates a
@@ -136,10 +170,4 @@ func prepID(seq int) string {
 // becomes a result because acceptance is the single store operation.
 func (o *Orchestrator) AcceptResult(result *core.AttemptResult) error {
 	return o.results.Accept(result)
-}
-
-// Result returns the private result for one account and attempt, or
-// core.ErrNoResult. This is the debrief retrieval path.
-func (o *Orchestrator) Result(accountID string, processGeneration, attemptGeneration uint64) (*core.AttemptResult, error) {
-	return o.results.Lookup(accountID, processGeneration, attemptGeneration)
 }

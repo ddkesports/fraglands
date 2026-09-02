@@ -7,12 +7,12 @@ import (
 )
 
 func TestAcceptAndRetrieveResult(t *testing.T) {
-	o, id := setupReady(t)
+	o, id, owner, _ := setupReady(t)
 
-	if _, err := o.Claim(id, "acct-a"); err != nil {
+	if _, err := o.Claim(owner, id); err != nil {
 		t.Fatal(err.Error())
 	}
-	target, err := o.IssueJoinIntent(id, "acct-a", testSteam)
+	target, err := o.IssueJoinIntent(owner, id)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -20,7 +20,7 @@ func TestAcceptAndRetrieveResult(t *testing.T) {
 	// The server participant accepts one private result for the attempt.
 	result := &core.AttemptResult{
 		ID:                "res-1",
-		AccountID:         "acct-a",
+		AccountID:         owner.ID,
 		RevisionID:        target.Intent.RevisionID,
 		ProcessGeneration: target.Intent.Generation,
 		AttemptGeneration: 1,
@@ -32,7 +32,7 @@ func TestAcceptAndRetrieveResult(t *testing.T) {
 	}
 
 	// The debrief retrieval is private: only the owning account reads it.
-	got, err := o.Result("acct-a", target.Intent.Generation, 1)
+	got, err := o.Result(owner, target.Intent.Generation, 1)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -46,7 +46,7 @@ func TestAcceptAndRetrieveResult(t *testing.T) {
 	}
 
 	// No result exists for another attempt.
-	if _, err := o.Result("acct-a", target.Intent.Generation, 2); err != core.ErrNoResult {
+	if _, err := o.Result(owner, target.Intent.Generation, 2); err != core.ErrNoResult {
 		t.Fatalf("expected ErrNoResult, got %v", err)
 	}
 }
