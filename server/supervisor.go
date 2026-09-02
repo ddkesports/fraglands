@@ -56,15 +56,15 @@ func NewSupervisor(launcher ProcessLauncher, basePort int, spoolRoot string) (*S
 // Start launches one new server process generation with an isolated spec:
 // a unique generation, a dedicated port, and a dedicated spool directory.
 // The returned process is in the Launching state; readiness is proven
-// separately by the worker.
+// separately by the worker. A failed launch rolls back the reservation so
+// no port, spool, or generation leaks.
 func (s *Supervisor) Start(ctx context.Context) (Process, error) {
 	s.mtx.Lock()
 	spec, id, err := s.allocateSpecLocked()
+	s.mtx.Unlock()
 	if err != nil {
-		s.mtx.Unlock()
 		return nil, err
 	}
-	s.mtx.Unlock()
 
 	proc, err := s.launcher.Launch(ctx, spec)
 	if err != nil {
@@ -76,6 +76,11 @@ func (s *Supervisor) Start(ctx context.Context) (Process, error) {
 		s.mtx.Unlock()
 		return nil, err
 	}
+
+	// Register the launched process under the reserved ID.
+	s.mtx.Lock()
+	s.processes[id] = proc
+	s.mtx.Unlock()
 	return proc, nil
 }
 
@@ -83,9 +88,13 @@ func (s *Supervisor) Start(ctx context.Context) (Process, error) {
 // spool. Callers must hold s.mtx.
 func (s *Supervisor) allocateSpecLocked() (ProcessSpec, string, error) {
 	gen := s.nextGeneration
+	port := s.basePort + int(gen) - 1
+	if port > 65535 {
+		// Do not consume a generation on an unsatisfiable allocation.
+		return ProcessSpec{}, "", fmt.Errorf("%w: generation %d needs port %d", ErrPortExhausted, gen, port)
+	}
 	s.nextGeneration++
 
-	port := s.basePort + int(gen) - 1
 	if s.usedPorts[port] {
 		return ProcessSpec{}, "", fmt.Errorf("%w: port %d", ErrPortInUse, port)
 	}
@@ -115,6 +124,33 @@ func (s *Supervisor) Get(id string) (Process, error) {
 		return nil, ErrUnknownProcess
 	}
 	return proc, nil
+}
+
+// Reap releases one terminal process from the supervisor's registry and
+// frees its port and spool for reuse. Only a process that reached the
+// terminal Crashed or Stopped state may be reaped; a live process is
+// refused and nothing is freed. Ownership stays simple: reaping requires
+// the caller to hold the process handle, so the registry and the
+// reservation always move together.
+func (s *Supervisor) Reap(proc Process) error {
+	if proc == nil {
+		return ErrUnknownProcess
+	}
+	id := fmt.Sprintf("proc-%d", proc.Spec().Generation)
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	registered, ok := s.processes[id]
+	if !ok || registered != proc {
+		return ErrUnknownProcess
+	}
+	if !proc.State().Terminal() {
+		return ErrNotRunning
+	}
+	delete(s.processes, id)
+	delete(s.usedPorts, proc.Spec().Port)
+	delete(s.usedSpools, proc.Spec().SpoolDir)
+	return nil
 }
 
 // Live returns the number of processes in a non-terminal state.

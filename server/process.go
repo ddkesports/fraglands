@@ -18,7 +18,8 @@ type Process interface {
 	// MarkRunning moves the process from Launching to Running.
 	MarkRunning() error
 	// MarkReady records the readiness fact and moves the process to Ready.
-	// It refuses when readiness was already recorded.
+	// A second readiness fact for one generation is refused with
+	// ErrReadinessAlreadyRecorded.
 	MarkReady(fact ReadinessFact) error
 	// MarkCrashed records a crash with a typed reason and moves the process
 	// to the terminal Crashed state. It refuses on a terminal process.
@@ -29,8 +30,10 @@ type Process interface {
 	// WaitTerminal waits until the process reaches a terminal state. It
 	// cannot miss the transition.
 	WaitTerminal(ctx context.Context) (ProcessState, error)
-	// DeliverArtifact records one artifact delivered by the worker. It
-	// refuses when the process is not accepting artifacts.
+	// DeliverArtifact records one artifact delivered by the worker.
+	// Delivery is only accepted on the bound process handle: there is no
+	// supervisor-level delivery by process ID string. It refuses when the
+	// process is not accepting artifacts.
 	DeliverArtifact(artifact Artifact) error
 	// Artifacts returns the artifacts delivered so far.
 	Artifacts() []Artifact
