@@ -20,4 +20,7 @@
 //
 // This package is deliberately free of Steam, real host processes, and any
 // game-state interpretation. It is pure contract plus fake-process tests.
+// The real local-process adapter lives in server/hostexec: it implements
+// ProcessLauncher against os/exec with an explicit executable allowlist and
+// is wired in only by an explicit deployment decision.
 package server
