@@ -3,7 +3,7 @@
 // orchestrator and a real host: the orchestrator asks for a server process
 // generation, and a worker implementation delivers it.
 //
-// The contract covers exactly five things:
+// The contract covers exactly six things:
 //
 //   - process identity: every process carries a unique generation, a port,
 //     and a spool directory (see ProcessSpec);
@@ -13,6 +13,8 @@
 //     fact with evidence recorded by the worker (see ReadinessFact);
 //   - artifact delivery: the worker delivers artifacts explicitly; the
 //     supervisor never invents or fabricates them (see ArtifactDelivery);
+//   - spool ingestion: artifacts are decoded through strict, versioned
+//     contracts before they are trusted (see ParseTerminalSummaryArtifact);
 //   - crash-stop: a crashed process moves to the Crashed state with a typed
 //     reason and no partial state; it never auto-restarts.
 //
