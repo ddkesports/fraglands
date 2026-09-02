@@ -247,6 +247,22 @@ func (f *stopErrorsButCrashes) Stop(ctx context.Context) error {
 	return errors.New("fake: stop error after crash")
 }
 
+// recoverableStopProcess wraps a fakeProcess whose first Stop fails (the
+// host is briefly unreachable) and whose later Stops succeed.
+type recoverableStopProcess struct {
+	*fakeProcess
+	failFirst *sync.Once
+}
+
+func (f *recoverableStopProcess) Stop(ctx context.Context) error {
+	failed := false
+	f.failFirst.Do(func() { failed = true })
+	if failed {
+		return errors.New("fake: host unreachable")
+	}
+	return f.fakeProcess.Stop(ctx)
+}
+
 // bareProcess is a fakeProcess reduced to exactly the server.Process
 // contract: no WaitReadiness, no Stop. Methods are delegated explicitly so
 // the optional seams are not promoted from the embedded fake.
@@ -612,6 +628,257 @@ func TestAllocatorStopFailsProcessRemainsLive(t *testing.T) {
 	}
 	if _, err := sup.supervisor.Get(procKey(1)); err != nil {
 		t.Fatalf("process must remain recoverable via supervisor.Get: %v", err)
+	}
+}
+
+// Stop fails while live, the generation is enumerable, and a later Recover
+// (after the stop obstruction clears) reclaims the process: supervisor Live
+// drops to 0, Get refuses the ID, and the reservation is released.
+func TestAllocatorRecoverAfterStopFailsLive(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	// The stop obstruction is a one-shot: the first Stop (during failed
+	// cleanup) fails, later Stops succeed. This models a host that is
+	// briefly unreachable and then recovers.
+	var failFirstStop sync.Once
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &recoverableStopProcess{fakeProcess: fp, failFirst: &failFirstStop}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(80*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, aerr := a.Allocate(context.Background(), revision())
+	var ce *CleanupError
+	if !errors.As(aerr, &ce) {
+		t.Fatalf("expected *CleanupError, got %v", aerr)
+	}
+
+	// The generation is enumerable through the allocator itself; recovery
+	// never depends on the caller retaining the error.
+	gens := a.FailedCleanupGenerations()
+	if len(gens) != 1 || gens[0] != 1 {
+		t.Fatalf("expected [1] retained, got %v", gens)
+	}
+	if sup.supervisor.Live() != 1 {
+		t.Fatalf("expected the process to remain live before recovery, got %d", sup.supervisor.Live())
+	}
+
+	// Recover reclaims it: stop (now succeeding) + reap.
+	if err := a.Recover(context.Background(), 1); err != nil {
+		t.Fatalf("recovery failed: %v", err)
+	}
+
+	if sup.supervisor.Live() != 0 {
+		t.Fatalf("expected 0 live processes after recovery, got %d", sup.supervisor.Live())
+	}
+	if _, err := sup.supervisor.Get(procKey(1)); !errors.Is(err, server.ErrUnknownProcess) {
+		t.Fatalf("expected generation 1 unknown after recovery, got %v", err)
+	}
+	// The retained handle is deleted only after the verified reclaim.
+	if gens := a.FailedCleanupGenerations(); len(gens) != 0 {
+		t.Fatalf("expected no retained generations after recovery, got %v", gens)
+	}
+	sup.assertReapedExactlyOnce(t, 1, sup.launchedByGeneration(1))
+}
+
+// Recover on a generation that was never retained is a no-op.
+func TestAllocatorRecoverUnknownGeneration(t *testing.T) {
+	a, _ := testAllocator()
+	if err := a.Recover(context.Background(), 99); err != nil {
+		t.Fatalf("recover of unknown generation must be a no-op, got %v", err)
+	}
+}
+
+// Concurrent Recover calls for one generation: exactly one owner performs
+// the teardown, the rest observe success, and the process is reclaimed
+// exactly once.
+func TestRaceRecoverConcurrent(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	var failFirstStop sync.Once
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &recoverableStopProcess{fakeProcess: fp, failFirst: &failFirstStop}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(80*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, aerr := a.Allocate(context.Background(), revision())
+	var ce *CleanupError
+	if !errors.As(aerr, &ce) {
+		t.Fatalf("expected CleanupError, got %v", aerr)
+	}
+
+	const n = 6
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = a.Recover(context.Background(), 1)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent recover %d failed: %v", i, err)
+		}
+	}
+	if sup.supervisor.Live() != 0 {
+		t.Fatalf("expected 0 live processes, got %d", sup.supervisor.Live())
+	}
+	if gens := a.FailedCleanupGenerations(); len(gens) != 0 {
+		t.Fatalf("expected no retained generations, got %v", gens)
+	}
+	sup.assertReapedExactlyOnce(t, 1, sup.launchedByGeneration(1))
+}
+
+// A failed recovery keeps the handle retained: it stays enumerable and can
+// be retried later.
+func TestAllocatorFailedRecoverStaysRetained(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	// Every Stop fails for now: recovery cannot reclaim the process.
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &stopFailsProcess{fakeProcess: fp}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(80*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, aerr := a.Allocate(context.Background(), revision())
+	var ce *CleanupError
+	if !errors.As(aerr, &ce) {
+		t.Fatalf("expected CleanupError, got %v", aerr)
+	}
+
+	// Recovery fails while the stop obstruction persists.
+	if err := a.Recover(context.Background(), 1); err == nil {
+		t.Fatal("expected recovery to fail while stop keeps failing")
+	}
+	if gens := a.FailedCleanupGenerations(); len(gens) != 1 || gens[0] != 1 {
+		t.Fatalf("expected generation 1 to stay retained, got %v", gens)
+	}
+	if sup.supervisor.Live() != 1 {
+		t.Fatalf("expected the process to stay live, got %d", sup.supervisor.Live())
+	}
+
+	// Swap the wrap behavior: clear the obstruction by directly stopping
+	// through the underlying fake (the operator's out-of-band repair), then
+	// retry recovery; the reap then succeeds.
+	fp := sup.launchedByGeneration(1)
+	if err := fp.Stop(context.Background()); err != nil {
+		t.Fatalf("out-of-band stop failed: %v", err)
+	}
+	if err := a.Recover(context.Background(), 1); err != nil {
+		t.Fatalf("retry recovery failed: %v", err)
+	}
+	if sup.supervisor.Live() != 0 {
+		t.Fatalf("expected 0 live processes after retry, got %d", sup.supervisor.Live())
+	}
+	if gens := a.FailedCleanupGenerations(); len(gens) != 0 {
+		t.Fatalf("expected no retained generations after retry, got %v", gens)
+	}
+}
+
+// A Reap refusal (live process with no stopper) keeps the handle retained:
+// enumerable, recoverable later, never silently dropped.
+func TestAllocatorReapRefusalStaysRetained(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		return &bareProcess{f: fp}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(60*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	_, aerr := a.Allocate(context.Background(), revision())
+	var ce *CleanupError
+	if !errors.As(aerr, &ce) {
+		t.Fatalf("expected CleanupError, got %v", aerr)
+	}
+	if gens := a.FailedCleanupGenerations(); len(gens) != 1 || gens[0] != 1 {
+		t.Fatalf("expected [1] retained, got %v", gens)
+	}
+
+	// Recovery also fails (still no stopper, still live).
+	if err := a.Recover(context.Background(), 1); err == nil {
+		t.Fatal("expected recovery to fail for a live bare process")
+	}
+	if gens := a.FailedCleanupGenerations(); len(gens) != 1 || gens[0] != 1 {
+		t.Fatalf("expected generation 1 to stay retained, got %v", gens)
+	}
+	if sup.supervisor.Live() != 1 {
+		t.Fatalf("expected the process to stay live and registered, got %d", sup.supervisor.Live())
+	}
+}
+
+// RecoverAll reclaims every retained generation; Close is the shutdown
+// alias. Mixed state: one recovers, one stays retained and is reported.
+func TestAllocatorRecoverAllAndClose(t *testing.T) {
+	sup := newFakeSupervisor()
+	sup.readyAfter = -1
+	// Generation 1: recoverable (first stop fails, retry succeeds).
+	// Generation 2: permanently un-reclaimable (stop always fails).
+	var failFirstStop sync.Once
+	wraps := 0
+	sup.wrap = func(fp *fakeProcess) server.Process {
+		wraps++
+		if wraps == 1 {
+			return &recoverableStopProcess{fakeProcess: fp, failFirst: &failFirstStop}
+		}
+		return &stopFailsProcess{fakeProcess: fp}
+	}
+	a, err := NewAllocator(sup.supervisor, WithReadinessTimeout(60*time.Millisecond))
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// Two failed allocations: generations 1 and 2.
+	for i := 0; i < 2; i++ {
+		_, aerr := a.Allocate(context.Background(), revision())
+		var ce *CleanupError
+		if !errors.As(aerr, &ce) {
+			t.Fatalf("expected CleanupError for allocation %d, got %v", i+1, aerr)
+		}
+	}
+	gens := a.FailedCleanupGenerations()
+	if len(gens) != 2 {
+		t.Fatalf("expected 2 retained generations, got %v", gens)
+	}
+
+	// RecoverAll reclaims what it can.
+	failures := a.RecoverAll(context.Background())
+	if len(failures) != 1 {
+		t.Fatalf("expected exactly 1 recovery failure, got %v", failures)
+	}
+	if _, ok := failures[2]; !ok {
+		t.Fatalf("expected generation 2 to fail recovery, got %v", failures)
+	}
+	if sup.supervisor.Live() != 1 {
+		t.Fatalf("expected 1 live process (generation 2), got %d", sup.supervisor.Live())
+	}
+	if gens := a.FailedCleanupGenerations(); len(gens) != 1 || gens[0] != 2 {
+		t.Fatalf("expected only generation 2 retained, got %v", gens)
+	}
+
+	// Close is the shutdown alias: it retries and reports the same failure.
+	failures = a.Close(context.Background())
+	if len(failures) != 1 {
+		if _, ok := failures[2]; !ok {
+			t.Fatalf("expected generation 2 to fail on Close, got %v", failures)
+		}
+	}
+	if gens := a.FailedCleanupGenerations(); len(gens) != 1 || gens[0] != 2 {
+		t.Fatalf("expected only generation 2 retained after Close, got %v", gens)
 	}
 }
 
