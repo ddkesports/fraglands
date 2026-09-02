@@ -81,3 +81,37 @@ func testIdentityAuthority() *mockIdentityAuthority {
 		"cred-b": other,
 	}}
 }
+
+// mockServerAuthority authenticates fixed credentials to fixed server
+// participants.
+type mockServerAuthority struct {
+	participants map[string]*ServerParticipant
+}
+
+// AuthenticateServer returns the server participant bound to the credential.
+func (m *mockServerAuthority) AuthenticateServer(ctx context.Context, credential string) (*ServerParticipant, error) {
+	p, ok := m.participants[credential]
+	if !ok {
+		return nil, ErrUnauthenticated
+	}
+	return p, nil
+}
+
+// testServerParticipants returns two server participants: one bound to
+// process generation 1 (the default test generation) and one bound to
+// another generation.
+func testServerParticipants() (p1, p2 *ServerParticipant) {
+	p1 = &ServerParticipant{ID: "srv-a", ProcessGeneration: 1}
+	p2 = &ServerParticipant{ID: "srv-b", ProcessGeneration: 2}
+	return p1, p2
+}
+
+// testServerAuthority builds a server authority over the test server
+// participants. The default participant is bound to process generation 1.
+func testServerAuthority() *mockServerAuthority {
+	p1, p2 := testServerParticipants()
+	return &mockServerAuthority{participants: map[string]*ServerParticipant{
+		"scred-a": p1,
+		"scred-b": p2,
+	}}
+}

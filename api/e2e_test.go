@@ -87,6 +87,40 @@ func testIdentityAuthority() *fakeIdentityAuthority {
 	}}
 }
 
+// fakeServerAuthority authenticates fixed credentials to fixed server
+// participants.
+type fakeServerAuthority struct {
+	participants map[string]*orchestrator.ServerParticipant
+}
+
+// AuthenticateServer returns the server participant bound to the credential.
+func (f *fakeServerAuthority) AuthenticateServer(ctx context.Context, credential string) (*orchestrator.ServerParticipant, error) {
+	p, ok := f.participants[credential]
+	if !ok {
+		return nil, orchestrator.ErrUnauthenticated
+	}
+	return p, nil
+}
+
+// testServerParticipants returns the test server participants: the default
+// participant is bound to process generation 1, and an attacker participant
+// is bound to a different generation.
+func testServerParticipants() (p1, p2 *orchestrator.ServerParticipant) {
+	p1 = &orchestrator.ServerParticipant{ID: "srv-a", ProcessGeneration: 1}
+	p2 = &orchestrator.ServerParticipant{ID: "srv-b", ProcessGeneration: 2}
+	return p1, p2
+}
+
+// testServerAuthority builds a server authority over the test server
+// participants.
+func testServerAuthority() *fakeServerAuthority {
+	p1, p2 := testServerParticipants()
+	return &fakeServerAuthority{participants: map[string]*orchestrator.ServerParticipant{
+		"scred-a": p1,
+		"scred-b": p2,
+	}}
+}
+
 // testServer wires one API over one orchestrator and returns the test
 // server plus the orchestrator for direct server-participant simulation.
 func testServer(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator) {
@@ -99,7 +133,7 @@ func testServer(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator) {
 		DisplayName: "Mid Boss Fight",
 		FileName:    "mid-boss.dem",
 	}}
-	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{}, testIdentityAuthority())
+	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{}, testIdentityAuthority(), testServerAuthority())
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	t.Cleanup(server.Close)
 	return server, orch
@@ -247,16 +281,17 @@ func TestEndToEndJoinFlow(t *testing.T) {
 
 	// The server participant consumes the intent at the server: the exact
 	// bound revision, generation, and Steam identity must be presented.
-	if err := orch.ConsumeJoinIntent(intentID, revisionID, 1, ownerAccount.SteamID); err != nil {
+	participant := testServerAuthority().participants["scred-a"]
+	if err := orch.ConsumeJoinIntent(participant, intentID, revisionID, ownerAccount.SteamID); err != nil {
 		t.Fatal(err.Error())
 	}
 	// One-use: a second presentation is refused.
-	if err := orch.ConsumeJoinIntent(intentID, revisionID, 1, ownerAccount.SteamID); !errors.Is(err, core.ErrIntentAlreadyUsed) {
+	if err := orch.ConsumeJoinIntent(participant, intentID, revisionID, ownerAccount.SteamID); !errors.Is(err, core.ErrIntentAlreadyUsed) {
 		t.Fatalf("expected ErrIntentAlreadyUsed, got %v", err)
 	}
 
 	// The server participant accepts one private result for the attempt.
-	if err := orch.AcceptResult(&core.AttemptResult{
+	if err := orch.AcceptResult(participant, &core.AttemptResult{
 		ID:                "res-1",
 		AccountID:         ownerAccount.ID,
 		RevisionID:        revisionID,
@@ -384,11 +419,12 @@ func TestAdversarialSteamBinding(t *testing.T) {
 	// refused: the intent is bound to the principal identity only.
 	intentID, _ := body["intent_id"].(string)
 	revisionID, _ := body["revision_id"].(string)
-	if err := orch.ConsumeJoinIntent(intentID, revisionID, 1, attackerAcct.SteamID); !errors.Is(err, core.ErrSteamIDAlreadyBound) {
+	participant := testServerAuthority().participants["scred-a"]
+	if err := orch.ConsumeJoinIntent(participant, intentID, revisionID, attackerAcct.SteamID); !errors.Is(err, core.ErrSteamIDAlreadyBound) {
 		t.Fatalf("expected ErrSteamIDAlreadyBound, got %v", err)
 	}
 	// The intent was not burned by the refused consume.
-	if err := orch.ConsumeJoinIntent(intentID, revisionID, 1, ownerAccount.SteamID); err != nil {
+	if err := orch.ConsumeJoinIntent(participant, intentID, revisionID, ownerAccount.SteamID); err != nil {
 		t.Fatal(err.Error())
 	}
 }
@@ -416,11 +452,16 @@ func TestAdversarialDebriefPrivacy(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %v", code, body)
 	}
 
-	// The server participant accepts the owner private result.
-	if err := orch.AcceptResult(&core.AttemptResult{
+	// The server participant consumes the intent and accepts the owner
+	// private result.
+	participant := testServerAuthority().participants["scred-a"]
+	if err := orch.ConsumeJoinIntent(participant, body["intent_id"].(string), body["revision_id"].(string), ownerAccount.SteamID); err != nil {
+		t.Fatal(err.Error())
+	}
+	if err := orch.AcceptResult(participant, &core.AttemptResult{
 		ID:                "res-1",
 		AccountID:         ownerAccount.ID,
-		RevisionID:        "rev-1",
+		RevisionID:        body["revision_id"].(string),
 		ProcessGeneration: 1,
 		AttemptGeneration: 7,
 		ReplayID:          "replay-1",
@@ -525,7 +566,7 @@ func TestEndToEndFailedPreparation(t *testing.T) {
 	sources := []core.ReplaySource{{ID: "replay-1"}}
 	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{
 		failWith: &core.FailureReason{Code: "replay_unsupported", Message: "field kHealth unsupported"},
-	}, &fakeAllocator{}, testIdentityAuthority())
+	}, &fakeAllocator{}, testIdentityAuthority(), testServerAuthority())
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	defer server.Close()
 
@@ -572,7 +613,7 @@ func TestEndToEndAllocationFailure(t *testing.T) {
 	sources := []core.ReplaySource{{ID: "replay-1"}}
 	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{
 		fail: errors.New("no worker capacity in region"),
-	}, testIdentityAuthority())
+	}, testIdentityAuthority(), testServerAuthority())
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	defer server.Close()
 
@@ -612,7 +653,7 @@ func TestAllocationErrorTypedThroughAPI(t *testing.T) {
 	sources := []core.ReplaySource{{ID: "replay-1"}}
 	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{
 		fail: errors.New("no worker capacity in region"),
-	}, testIdentityAuthority())
+	}, testIdentityAuthority(), testServerAuthority())
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	defer server.Close()
 

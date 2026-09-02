@@ -8,12 +8,19 @@ import (
 
 func TestAcceptAndRetrieveResult(t *testing.T) {
 	o, id, owner, _ := setupReady(t)
+	participant := testServerAuthority().participants["scred-a"]
 
 	if _, err := o.Claim(owner, id); err != nil {
 		t.Fatal(err.Error())
 	}
 	target, err := o.IssueJoinIntent(owner, id)
 	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// The server participant consumes the intent: this admits the account
+	// on the participant's process generation.
+	if err := o.ConsumeJoinIntent(participant, target.Intent.ID, target.Intent.RevisionID, owner.SteamID); err != nil {
 		t.Fatal(err.Error())
 	}
 
@@ -27,7 +34,7 @@ func TestAcceptAndRetrieveResult(t *testing.T) {
 		ReplayID:          "replay-1",
 		TakeoverTick:      63280,
 	}
-	if err := o.AcceptResult(result); err != nil {
+	if err := o.AcceptResult(participant, result); err != nil {
 		t.Fatal(err.Error())
 	}
 
@@ -41,7 +48,7 @@ func TestAcceptAndRetrieveResult(t *testing.T) {
 	}
 
 	// A second result for one attempt is refused.
-	if err := o.AcceptResult(result); err != core.ErrResultAlreadyAccepted {
+	if err := o.AcceptResult(participant, result); err != core.ErrResultAlreadyAccepted {
 		t.Fatalf("expected ErrResultAlreadyAccepted, got %v", err)
 	}
 

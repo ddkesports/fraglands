@@ -165,9 +165,42 @@ func prepID(seq int) string {
 	return fmt.Sprintf("prep-%d", seq)
 }
 
-// AcceptResult accepts one private result for an attempt. The server
-// participant calls this after the attempt ends; a failed upload never
-// becomes a result because acceptance is the single store operation.
-func (o *Orchestrator) AcceptResult(result *core.AttemptResult) error {
+// AcceptResult accepts one private result for an attempt on behalf of an
+// authenticated server participant. The result's account, process
+// generation, and revision are validated against the admission recorded at
+// join-intent consumption: a participant cannot submit results for accounts
+// that were never admitted on its process generation, and cannot invent
+// identity facts. A failed upload never becomes a result because acceptance
+// is the single store operation.
+func (o *Orchestrator) AcceptResult(participant *ServerParticipant, result *core.AttemptResult) error {
+	if participant == nil {
+		return ErrUnauthenticated
+	}
+	if result == nil {
+		return core.ErrInvalidAccount
+	}
+	if result.AccountID == "" {
+		return core.ErrInvalidAccount
+	}
+	if participant.ProcessGeneration != result.ProcessGeneration {
+		return ErrWrongProcessGeneration
+	}
+	adm := o.admissionFor(result.AccountID, participant.ProcessGeneration)
+	if adm == nil {
+		return ErrUnadmittedAccount
+	}
+	if adm.revisionID != result.RevisionID {
+		return core.ErrRevisionMismatch
+	}
 	return o.results.Accept(result)
+}
+
+// admissionFor returns the admission record for one account on one process
+// generation, or nil.
+func (o *Orchestrator) admissionFor(accountID string, processGeneration uint64) *admission {
+	var record *admission
+	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
+		record = o.admissions[admissionKey{accountID: accountID, processGeneration: processGeneration}]
+	})
+	return record
 }
