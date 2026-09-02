@@ -58,9 +58,9 @@ button{padding:.45rem 1rem;cursor:pointer}
 <div class="actions">
 {{if .Lobby}}
 {{if .Lobby.HasSlot}}
-<form method="post" action="/preparations/{{.ID}}/slots/release"><button type="submit">Release my slot</button></form>
+<form method="post" action="/preparations/{{.ID}}/slots/release"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">Release my slot</button></form>
 {{else}}
-<form method="post" action="/preparations/{{.ID}}/slots"><button type="submit">Claim a lobby slot</button></form>
+<form method="post" action="/preparations/{{.ID}}/slots"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">Claim a lobby slot</button></form>
 {{end}}
 {{end}}
 <a href="/">Back to selection</a>

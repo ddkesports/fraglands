@@ -16,9 +16,9 @@ header{display:flex;justify-content:space-between;align-items:baseline}
 <body>
 <header>
 <h1>Replay selection</h1>
-<span>{{.Account}} &middot; <form method="post" action="/logout" style="display:inline"><button type="submit">Sign out</button></form></span>
+<span>{{.Account}} &middot; <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">Sign out</button></form></span>
 </header>
-<p>Pick one replay and the takeover tick (the moment input unlocks). The lead-in window is derived from the replay itself.</p>
+<p>Pick one replay and the takeover tick (the moment input unlocks). The lead-in window is derived by the reconstruction provider from proven replay facts; if no lead-in can be derived, none is applied.</p>
 <table>
 <tr><th>Replay</th><th>File</th><th>Takeover tick</th><th></th></tr>
 {{range .Replays}}
@@ -28,6 +28,7 @@ header{display:flex;justify-content:space-between;align-items:baseline}
 <td>
 <form method="post" action="/preparations">
 <input type="hidden" name="replay_id" value="{{.ID}}">
+<input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
 <input type="number" name="takeover_tick" min="1" placeholder="tick" required>
 <button type="submit">Prepare</button>
 </form>

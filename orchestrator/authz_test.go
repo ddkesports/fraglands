@@ -19,8 +19,25 @@ func TestPreparationViewAuthorization(t *testing.T) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
 	}
 
-	// A claimed participant views status.
-	if _, err := o.Claim(other, id); err != nil {
+	// A stranger cannot claim: no invitation, no slot, no view.
+	if _, err := o.Claim(other, id); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden for stranger claim, got %v", err)
+	}
+	if _, err := o.Preparation(other, id); err != ErrForbidden {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+
+	// The owner invites the other account with an opaque authorization.
+	invite, err := o.Invite(owner, id, other.ID)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if invite.Token == "" {
+		t.Fatal("expected a non-empty opaque invite token")
+	}
+
+	// The invited participant claims with the opaque token.
+	if _, err := o.ClaimAuthorized(other, id, invite.Token); err != nil {
 		t.Fatal(err.Error())
 	}
 	if _, err := o.Preparation(other, id); err != nil {

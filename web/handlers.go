@@ -13,8 +13,10 @@ import (
 // replay sources with a timecode form for each.
 func (w *Web) handleHome(rw http.ResponseWriter, r *http.Request, p *principal) {
 	w.render(rw, http.StatusOK, "index.html", map[string]any{
-		"Account": p.account.DisplayName,
-		"Replays": w.orch.Sources(),
+		"Account":     p.account.DisplayName,
+		"Replays":     w.orch.Sources(),
+		"CSRFToken":   w.csrfTokenFor(p.sessionID),
+		"OmissionsOK": true,
 	})
 }
 
@@ -57,11 +59,12 @@ func (w *Web) handlePreparation(rw http.ResponseWriter, r *http.Request, p *prin
 	}
 
 	data := map[string]any{
-		"Account": p.account.DisplayName,
-		"ID":      status.Preparation.ID,
-		"Replay":  status.Preparation.ReplayID,
-		"State":   status.Preparation.State().String(),
-		"Tick":    status.Preparation.TakeoverTick,
+		"Account":   p.account.DisplayName,
+		"ID":        status.Preparation.ID,
+		"Replay":    status.Preparation.ReplayID,
+		"State":     status.Preparation.State().String(),
+		"Tick":      status.Preparation.TakeoverTick,
+		"CSRFToken": w.csrfTokenFor(p.sessionID),
 	}
 
 	if rev := status.Preparation.Revision(); rev != nil {
