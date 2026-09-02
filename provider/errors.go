@@ -31,6 +31,9 @@ var (
 	// ErrPreparationTerminal is returned when Prepare is called on a
 	// preparation already in a terminal state.
 	ErrPreparationTerminal = errors.New("provider: preparation already terminal")
+	// ErrNilProvider is returned when a Preparer is constructed without a
+	// provider.
+	ErrNilProvider = errors.New("provider: nil provider")
 )
 
 // FailureCode maps a typed cause to the stable reason code carried on the
