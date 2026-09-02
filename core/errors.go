@@ -25,4 +25,14 @@ var (
 	// ErrResultAlreadyAccepted is returned when a second result arrives for one
 	// attempt generation.
 	ErrResultAlreadyAccepted = errors.New("core: result already accepted for attempt")
+
+	// ErrInvalidLobbyCapacity is returned when a lobby is constructed with a
+	// non-positive slot capacity.
+	ErrInvalidLobbyCapacity = errors.New("core: invalid lobby capacity")
+	// ErrInvalidAccount is returned when an account identifier is empty.
+	ErrInvalidAccount = errors.New("core: invalid account")
+	// ErrLobbyFull is returned when a slot claim would exceed lobby capacity.
+	ErrLobbyFull = errors.New("core: lobby full")
+	// ErrNoSlotClaimed is returned when releasing a slot no account holds.
+	ErrNoSlotClaimed = errors.New("core: no slot claimed by account")
 )
