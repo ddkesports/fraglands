@@ -68,23 +68,3 @@ func (o *Orchestrator) AdmittedAccountFor(processGeneration uint64, revisionID s
 		return "", ErrAmbiguousAdmission
 	}
 }
-
-// AdmittedRevisionFor reports whether one account was admitted on one
-// process generation, and with which revision. It is the account-scoped
-// admission read used by composition: the caller already knows the account,
-// so attribution stays bound to that account instead of inferring it.
-func (o *Orchestrator) AdmittedRevisionFor(accountID string, processGeneration uint64) (string, bool) {
-	var (
-		revisionID string
-		found      bool
-	)
-	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
-		adm, ok := o.admissions[admissionKey{accountID: accountID, processGeneration: processGeneration}]
-		if !ok {
-			return
-		}
-		revisionID = adm.revisionID
-		found = true
-	})
-	return revisionID, found
-}
