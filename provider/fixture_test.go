@@ -9,13 +9,15 @@ import (
 	"github.com/paralin/s2replay/analysis"
 )
 
-// TestOptInPinnedReplayProvider runs the full provider path against a real
-// pinned demo: the store reads the file named by FRAGLANDS_PINNED_DEMO, the
-// real s2replay prover proves the ServerInfo tick interval, and the real
+// TestOptInPinnedReplayProvider runs the full provider path against the
+// canonical pinned demo (101514223.dem, 211730538 bytes,
+// sha256 b612e43f4055d4dde728c7eedbdd7ec38c3478ef90f33b870bfb29310b79194f):
+// the store reads the file named by FRAGLANDS_PINNED_DEMO, the real s2replay
+// prover proves the ServerInfo tick interval, and the real
 // analysis.ExtractRunbackFacts extracts facts at the takeover tick. It
-// asserts the objective and transient facts and the tick interval
-// provenance, not only revision success. It is skipped unless the
-// environment variable is set.
+// asserts the landed expected census (8 towers / 6 walkers / 2 transients)
+// and the tick interval provenance, not only revision success. It is skipped
+// unless the environment variable is set.
 //
 // Note: analysis.ExtractRunbackFacts refuses binaries without a clean VCS
 // identity. Run from a clean, committed git checkout (go test binaries built
@@ -69,25 +71,42 @@ func TestOptInPinnedReplayProvider(t *testing.T) {
 		t.Fatalf("tick interval must be positive, got %v", facts.TickProvenance.TickIntervalSeconds.Value)
 	}
 
-	// Objectives must carry the observed class rows.
+	// Objectives must match the landed s2replay PR9 expected census for this
+	// exact demo identity (101514223.dem, sha256 b612e43f...): 8 towers,
+	// 6 walkers, 2 transients. The upstream TestOptInPinnedRunbackObjectives
+	// pins the same numbers against this file.
 	objs := facts.Objectives
 	if objs.MidBoss.ClassName != analysis.RunbackMidBossClass {
 		t.Fatalf("expected mid boss class %s, got %s", analysis.RunbackMidBossClass, objs.MidBoss.ClassName)
 	}
-	if len(objs.Towers) == 0 || objs.Towers[0].ClassName != analysis.RunbackTowerClass {
-		t.Fatalf("expected tower rows with class %s, got %+v", analysis.RunbackTowerClass, objs.Towers)
+	if !objs.MidBoss.Alive.Alive {
+		t.Fatalf("expected mid boss alive, got %+v", objs.MidBoss)
 	}
-	if len(objs.Walkers) == 0 || objs.Walkers[0].ClassName != analysis.RunbackWalkerClass {
-		t.Fatalf("expected walker rows with class %s, got %+v", analysis.RunbackWalkerClass, objs.Walkers)
+	if len(objs.Towers) != 8 {
+		t.Fatalf("expected 8 towers, got %d", len(objs.Towers))
 	}
-	// Transients are the unattributed item-class rows; the slice must be
-	// non-nil and every row must carry a typed missing reason.
-	if objs.Transients == nil {
-		t.Fatal("transients slice must not be nil")
+	for _, tower := range objs.Towers {
+		if tower.ClassName != analysis.RunbackTowerClass || !tower.Alive.Alive {
+			t.Fatalf("tower row: %+v", tower)
+		}
+	}
+	if len(objs.Walkers) != 6 {
+		t.Fatalf("expected 6 walkers, got %d", len(objs.Walkers))
+	}
+	for _, walker := range objs.Walkers {
+		if walker.ClassName != analysis.RunbackWalkerClass || !walker.Alive.Alive {
+			t.Fatalf("walker row: %+v", walker)
+		}
+	}
+	if objs.Rejuvenator.Status != analysis.RunbackRejuvenatorStatusAbsent || objs.Rejuvenator.Last != nil {
+		t.Fatalf("rejuvenator must be typed absent, got %+v", objs.Rejuvenator)
+	}
+	if len(objs.Transients) != 2 {
+		t.Fatalf("expected 2 transients, got %d: %+v", len(objs.Transients), objs.Transients)
 	}
 	for _, tr := range objs.Transients {
-		if tr.MissingReason == "" {
-			t.Fatalf("transient %d missing typed reason: %+v", tr.EntityID, tr)
+		if tr.MissingReason != analysis.RunbackMissingOwnerUnattributed {
+			t.Fatalf("transient %d wrong reason: %+v", tr.EntityID, tr)
 		}
 	}
 
