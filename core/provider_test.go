@@ -212,6 +212,14 @@ func TestCompileRefusalsProduceNoPartialState(t *testing.T) {
 				MaxFreshnessTicks: 5,
 			},
 		},
+		{
+			name: "zero proven tick interval",
+			req: CompileRequest{
+				Facts:             runbackFactsFixture(),
+				RevisionID:        "rev-1",
+				MaxFreshnessTicks: 5,
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
