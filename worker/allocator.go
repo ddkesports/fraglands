@@ -8,6 +8,8 @@ package worker
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/paralin/fraglands/core"
@@ -49,6 +51,13 @@ func (e *CleanupError) Unwrap() error { return e.Err }
 // through a Supervisor. The supervisor owns the process lifecycle; the
 // allocator proves readiness with explicit evidence before reporting the
 // process as usable.
+//
+// When a failed allocation cannot be reclaimed, the allocator retains the
+// process handle and reports it through FailedCleanupGenerations; Recover
+// (or RecoverAll/Close at deployment shutdown) retries the teardown. The
+// allocator must outlive the orchestration lifetime and the shutdown path
+// that recovers retained processes. There is no background auto-restart:
+// recovery runs only when explicitly called.
 type Allocator struct {
 	// supervisor launches and supervises the server processes.
 	supervisor *server.Supervisor
@@ -56,6 +65,17 @@ type Allocator struct {
 	// readinessTimeout bounds the wait for explicit readiness evidence.
 	// Zero means DefaultReadinessTimeout.
 	readinessTimeout time.Duration
+
+	// mtx guards retained below.
+	mtx sync.Mutex
+	// retained holds the handles of processes whose cleanup failed, keyed
+	// by generation. A handle is deleted only after a verified terminal
+	// state and a successful reap.
+	retained map[uint64]server.Process
+
+	// recoverMtx serializes recovery attempts so concurrent Recover calls
+	// for one generation have exactly one teardown owner.
+	recoverMtx sync.Mutex
 }
 
 // Compile-time contract assertion.
@@ -83,7 +103,7 @@ func NewAllocator(supervisor *server.Supervisor, opts ...AllocatorOption) (*Allo
 	if supervisor == nil {
 		return nil, fmt.Errorf("worker: supervisor is required")
 	}
-	a := &Allocator{supervisor: supervisor}
+	a := &Allocator{supervisor: supervisor, retained: make(map[uint64]server.Process)}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(a)
@@ -175,9 +195,14 @@ type crashReasonGetter interface {
 // teardown: a process can crash during the stop itself, and that typed
 // crash reason is part of the failure truth. Both causes are preserved:
 // the original reason readiness was never proven, and the crash when one
-// was recorded. If the teardown cannot reclaim the process, the returned
-// error is a CleanupError carrying the generation: an explicit, recoverable
-// failure rather than a claim of clean rollback.
+// was recorded.
+//
+// If the teardown cannot reclaim the process, the handle is retained and
+// the returned error is a CleanupError carrying the generation: an
+// explicit, recoverable failure rather than a claim of clean rollback.
+// Recovery does not depend on the caller keeping the error: the retained
+// generation is enumerable through FailedCleanupGenerations and recoverable
+// through Recover.
 func (a *Allocator) failWithCleanup(proc server.Process, cause error) error {
 	generation := proc.Spec().Generation
 	message := fmt.Sprintf("process %d never became ready: %v", generation, cause)
@@ -197,6 +222,11 @@ func (a *Allocator) failWithCleanup(proc server.Process, cause error) error {
 	}
 
 	if cleanupErr != nil {
+		// Retain the handle so a later Recover can retry the teardown.
+		// Recovery never depends on the caller retaining this error.
+		a.mtx.Lock()
+		a.retained[generation] = proc
+		a.mtx.Unlock()
 		return &CleanupError{
 			Generation: generation,
 			Reason:     reason,
@@ -204,6 +234,89 @@ func (a *Allocator) failWithCleanup(proc server.Process, cause error) error {
 		}
 	}
 	return &orchestrator.AllocationError{Reason: reason}
+}
+
+// FailedCleanupGenerations returns the generations of processes whose
+// cleanup failed and which are still retained for recovery. The set is a
+// snapshot; Recover removes a generation from it once the teardown is
+// verified.
+func (a *Allocator) FailedCleanupGenerations() []uint64 {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	generations := make([]uint64, 0, len(a.retained))
+	for gen := range a.retained {
+		generations = append(generations, gen)
+	}
+	sort.Slice(generations, func(i, j int) bool { return generations[i] < generations[j] })
+	return generations
+}
+
+// Recover retries the teardown of one retained process: it stops the
+// process if it is still live, reaps it, and only then deletes the
+// retained handle. It returns nil when the process was reclaimed (or was
+// never retained), and an error when the process is still live or the reap
+// was refused - the handle stays retained in that case and can be retried.
+// Concurrent Recover calls for one generation collapse onto a single
+// owner: exactly one performs the teardown, the others wait for it and
+// observe its result, so a reclaim that already happened is never re-run.
+func (a *Allocator) Recover(ctx context.Context, generation uint64) error {
+	a.mtx.Lock()
+	proc, ok := a.retained[generation]
+	if !ok {
+		a.mtx.Unlock()
+		// Nothing retained: either never failed or already recovered.
+		return nil
+	}
+	a.mtx.Unlock()
+
+	// The cleanup path re-checks liveness under the process's own
+	// synchronization: after the first owner reaps the process, a second
+	// caller's cleanup sees a terminal process, skips the stop, and its
+	// reap is refused as unknown - which is the reclaim already done. To
+	// make concurrent recovery exactly-one-owner and retry-safe, the
+	// teardown is serialized per generation: the second caller waits until
+	// the first has finished, then observes the generation as gone.
+	a.recoverMtx.Lock()
+	defer a.recoverMtx.Unlock()
+
+	a.mtx.Lock()
+	proc, ok = a.retained[generation]
+	if !ok {
+		a.mtx.Unlock()
+		// Another owner reclaimed it while we waited.
+		return nil
+	}
+	a.mtx.Unlock()
+
+	err := a.cleanup(proc)
+
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	if err != nil {
+		// Keep the handle retained: the teardown can be retried.
+		return fmt.Errorf("worker: recovery of process %d failed: %w", generation, err)
+	}
+	delete(a.retained, generation)
+	return nil
+}
+
+// RecoverAll retries the teardown of every retained process. It returns the
+// generations that could not be reclaimed, mapped to their errors; the
+// failed handles stay retained and can be retried.
+func (a *Allocator) RecoverAll(ctx context.Context) map[uint64]error {
+	failures := make(map[uint64]error)
+	for _, generation := range a.FailedCleanupGenerations() {
+		if err := a.Recover(ctx, generation); err != nil {
+			failures[generation] = err
+		}
+	}
+	return failures
+}
+
+// Close recovers every retained process and is intended for deployment
+// shutdown. It returns the same failures as RecoverAll.
+func (a *Allocator) Close(ctx context.Context) map[uint64]error {
+	return a.RecoverAll(ctx)
 }
 
 // cleanup stops the process if it is still live and reaps it exactly once.
