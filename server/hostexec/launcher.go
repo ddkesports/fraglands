@@ -152,9 +152,10 @@ type Launcher struct {
 
 // Compile-time contract assertions.
 var (
-	_ server.ProcessLauncher = (*Launcher)(nil)
-	_ server.Process         = (*LaunchedProcess)(nil)
-	_ server.ProcessStopper  = (*LaunchedProcess)(nil)
+	_ server.ProcessLauncher        = (*Launcher)(nil)
+	_ server.Process                = (*LaunchedProcess)(nil)
+	_ server.ProcessStopper         = (*LaunchedProcess)(nil)
+	_ server.ProcessReadinessWaiter = (*LaunchedProcess)(nil)
 )
 
 // NewLauncher validates the configuration and constructs the launcher. It is
@@ -347,6 +348,11 @@ type LaunchedProcess struct {
 	// waitCh is closed exactly once when the state reaches a terminal
 	// state.
 	waitCh chan struct{}
+	// readyCh is closed exactly once when the process either proves
+	// readiness or reaches a terminal state, whichever happens first. A
+	// readiness waiter wakes on this single signal and re-reads the state
+	// under the lock; it can never miss either transition.
+	readyCh chan struct{}
 	// done is closed by the reaper after the child exited and the terminal
 	// state was recorded.
 	done chan struct{}
@@ -381,6 +387,7 @@ func newLaunchedProcess(spec server.ProcessSpec, l *Launcher) *LaunchedProcess {
 		maxStderrBytes: l.maxStderrBytes,
 		state:          server.ProcessStateLaunching,
 		waitCh:         make(chan struct{}),
+		readyCh:        make(chan struct{}),
 		done:           make(chan struct{}),
 	}
 }
@@ -575,6 +582,7 @@ func (p *LaunchedProcess) markReady(line string) {
 	}
 	p.fact = &server.ReadinessFact{Evidence: line, RecordedAt: time.Now()}
 	p.state = server.ProcessStateReady
+	p.closeReadyChLocked()
 }
 
 // readinessTimeout crash-stops a child that never proved readiness. The
@@ -767,6 +775,26 @@ func (p *LaunchedProcess) WaitTerminal(ctx context.Context) (server.ProcessState
 	}
 }
 
+// WaitReadiness implements server.ProcessReadinessWaiter: it waits until the
+// readiness fact is recorded or the process reaches a terminal state. It
+// cannot miss a transition: the readiness channel is closed under the state
+// lock whichever transition happens first, and the fact is read under the
+// same lock afterwards.
+func (p *LaunchedProcess) WaitReadiness(ctx context.Context) (server.ReadinessFact, error) {
+	select {
+	case <-p.readyCh:
+	case <-ctx.Done():
+		return server.ReadinessFact{}, ctx.Err()
+	}
+
+	p.mtx.Lock()
+	defer p.mtx.Unlock()
+	if p.fact != nil {
+		return *p.fact, nil
+	}
+	return server.ReadinessFact{}, server.ErrNotReady
+}
+
 // DeliverArtifact records one artifact delivered by the launcher's reaper.
 // It refuses when the process is not accepting artifacts.
 func (p *LaunchedProcess) DeliverArtifact(artifact server.Artifact) error {
@@ -798,7 +826,9 @@ func (p *LaunchedProcess) CrashReason() (server.CrashReason, error) {
 }
 
 // terminalLocked records the terminal state, the crash reason when present,
-// and wakes every waiter. Callers must hold p.mtx.
+// and wakes every waiter (including readiness waiters: they must observe
+// that the process became terminal without readiness). Callers must hold
+// p.mtx.
 func (p *LaunchedProcess) terminalLocked(state server.ProcessState, reason *server.CrashReason) {
 	p.state = state
 	p.reason = reason
@@ -806,6 +836,17 @@ func (p *LaunchedProcess) terminalLocked(state server.ProcessState, reason *serv
 	case <-p.waitCh:
 	default:
 		close(p.waitCh)
+	}
+	p.closeReadyChLocked()
+}
+
+// closeReadyChLocked closes the readiness wake channel exactly once. Callers
+// must hold p.mtx.
+func (p *LaunchedProcess) closeReadyChLocked() {
+	select {
+	case <-p.readyCh:
+	default:
+		close(p.readyCh)
 	}
 }
 
