@@ -3,6 +3,7 @@ module github.com/paralin/fraglands
 go 1.26.0
 
 require (
+	github.com/aperturerobotics/fastjson v0.1.1
 	github.com/aperturerobotics/util v1.34.9
 	github.com/pkg/errors v0.9.1
 )
