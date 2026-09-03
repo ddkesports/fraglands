@@ -113,6 +113,10 @@ type IngestRequest struct {
 	ArtifactName string
 	// Data is the raw artifact payload.
 	Data []byte
+	// ExpectedServerProcessGeneration is an optional owner-side binding. A
+	// process-owned watcher sets it from ProcessSpec; callers that leave it
+	// zero retain the standalone gate behavior.
+	ExpectedServerProcessGeneration uint64
 }
 
 // Ingest authenticates the server participant, decodes the artifact, binds
@@ -157,9 +161,11 @@ func (g *SummaryIngestionGate) Ingest(req IngestRequest) error {
 		return err
 	}
 
-	// 6. Bind the decoded identity to the authenticated participant: the
-	//    participant cannot submit summaries for another process
-	//    generation.
+	// 6. Bind the decoded identity to both the authenticated participant and,
+	//    when supplied by a process-owned watcher, its immutable ProcessSpec.
+	if req.ExpectedServerProcessGeneration != 0 && summary.ServerProcessGeneration != req.ExpectedServerProcessGeneration {
+		return ErrSummaryIdentityMismatch
+	}
 	if summary.ServerProcessGeneration != participant.ProcessGeneration {
 		return ErrSummaryIdentityMismatch
 	}

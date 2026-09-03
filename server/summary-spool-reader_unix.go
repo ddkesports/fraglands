@@ -14,7 +14,7 @@ func summarySpoolWatcherSupported() bool { return true }
 // files, and reads at most limit+1 bytes from that same handle. Atomic rename
 // publication therefore cannot expose an incomplete writer handle.
 func readSummarySpoolFile(path string, limit int) ([]byte, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
