@@ -186,7 +186,7 @@ func (w *SummarySpoolWatcher) pollOnce(ctx context.Context) error {
 			w.stopped = true
 			return err
 		}
-		if err := w.gate.Ingest(IngestRequest{Credential: w.credential, ArtifactName: name, Data: data}); err != nil {
+		if err := w.gate.Ingest(IngestRequest{Credential: w.credential, ArtifactName: name, Data: data, ExpectedServerProcessGeneration: w.spec.Generation}); err != nil {
 			if errors.Is(err, ErrSummaryDuplicate) {
 				w.processed[name] = struct{}{}
 				continue
