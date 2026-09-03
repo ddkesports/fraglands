@@ -85,10 +85,15 @@ type IngestRequest struct {
 // once. Crash-stop semantics: on any refusal, nothing is accepted, nothing
 // is recorded, and no partial state remains.
 func (g *SummaryIngestionGate) Ingest(req IngestRequest) error {
-	// 1. Authenticate the server participant from the credential.
+	// 1. Authenticate the server participant from the credential. The
+	// resolver's typed refusal is preserved so callers can distinguish a
+	// revoked lease from an unknown credential.
 	participant, err := g.participants.ResolveParticipant(context.Background(), req.Credential)
 	if err != nil || participant == nil {
-		return fmt.Errorf("%w: participant authentication failed", ErrUnauthenticated)
+		if err == nil {
+			return fmt.Errorf("%w: participant authentication failed", ErrUnauthenticated)
+		}
+		return fmt.Errorf("%w: participant authentication failed: %w", ErrUnauthenticated, err)
 	}
 
 	// 2. Refuse oversize artifacts before parsing.

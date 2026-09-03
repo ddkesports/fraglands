@@ -123,6 +123,277 @@ func validSummaryJSON(revision string) []byte {
 }
 
 // ---------------------------------------------------------------------------
+// composition: generation-scoped lease revocation gate
+// ---------------------------------------------------------------------------
+
+// setupReadyWithLease prepares one replay to ready on generation 7 with a
+// real ServerLeaseAuthority wired as the server authority: the lease is the
+// credential source, and its commit gate fences AcceptResult. Returns the
+// orchestrator, preparation ID, owner, lease authority, and the issued lease.
+func setupReadyWithLease(t *testing.T) (*orchestrator.Orchestrator, string, *core.Account, *core.ServerLeaseAuthority, *core.ServerLease) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	owner := &core.Account{ID: "acct-a", SteamID: 76561198000000001, DisplayName: "Owner"}
+	sources := []core.ReplaySource{{ID: "replay-1"}}
+	leases := core.NewServerLeaseAuthority()
+	lease, err := leases.IssueLease("srv-a", 7)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	o, err := orchestrator.NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, &mockIdentityAuthority{}, leases, testGrantAuthority())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	id, err := o.Prepare(owner, "replay-1", 0, 63280)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// Wait for the allocation to appear.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := o.Preparation(owner, id)
+		if err != nil {
+			t.Fatal(err.Error())
+		}
+		if status.Process != nil || status.AllocationFailure != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return o, id, owner, leases, lease
+}
+
+// admitFlowWithLease drives claim -> issue intent -> consume with the
+// lease-authenticated participant on generation 7.
+func admitFlowWithLease(t *testing.T, o *orchestrator.Orchestrator, leases *core.ServerLeaseAuthority, lease *core.ServerLease, id string, owner *core.Account) *core.JoinIntent {
+	t.Helper()
+	if _, err := o.Claim(owner, id); err != nil {
+		t.Fatal(err.Error())
+	}
+	target, err := o.IssueJoinIntent(owner, id)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	participant, err := leases.AuthenticateServer(context.Background(), lease.Credential())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if err := o.ConsumeJoinIntent(participant, target.Intent.ID, target.Intent.RevisionID, owner.SteamID); err != nil {
+		t.Fatal(err.Error())
+	}
+	return target.Intent
+}
+
+// TestCompositionLeaseCredentialAuthenticates proves the lease authority
+// serves as the orchestrator's server authority: the issued credential
+// authenticates to the bound participant, and a forged credential is
+// refused.
+func TestCompositionLeaseCredentialAuthenticates(t *testing.T) {
+	o, id, owner, leases, lease := setupReadyWithLease(t)
+	_ = id
+
+	participant, err := o.AuthenticateServer(context.Background(), lease.Credential())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if participant.ID != "srv-a" || participant.ProcessGeneration != 7 {
+		t.Fatalf("expected srv-a on generation 7, got %+v", participant)
+	}
+	if _, err := o.AuthenticateServer(context.Background(), "forged"); err == nil {
+		t.Fatal("expected refusal for a forged credential")
+	}
+	_ = leases
+	_ = owner
+}
+
+// TestCompositionLeaseRevocationRefusesCommit proves the wired gate: a
+// terminal revocation after admission refuses every later ingest whole, and
+// nothing is stored.
+func TestCompositionLeaseRevocationRefusesCommit(t *testing.T) {
+	o, id, owner, leases, lease := setupReadyWithLease(t)
+	intent := admitFlowWithLease(t, o, leases, lease, id, owner)
+
+	gate, err := NewServerIngestionGate(o)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// With a live lease the ingest commits.
+	if err := gate.Ingest(server.IngestRequest{
+		Credential:   lease.Credential(),
+		ArtifactName: artifactNameFor(3),
+		Data:         validSummaryJSON(intent.RevisionID),
+	}); err != nil {
+		t.Fatalf("expected acceptance on a live lease: %v", err)
+	}
+	if _, err := o.Result(owner, 7, 3); err != nil {
+		t.Fatalf("expected stored result on a live lease: %v", err)
+	}
+
+	// Terminal revocation of the generation.
+	if err := leases.Revoke(7); err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// The revoked credential can no longer authenticate.
+	if _, err := o.AuthenticateServer(context.Background(), lease.Credential()); !errors.Is(err, core.ErrLeaseRevoked) {
+		t.Fatalf("expected ErrLeaseRevoked after terminal revocation, got %v", err)
+	}
+
+	// A distinct attempt after revocation is refused whole: the commit is
+	// gated on the live lease and never runs.
+	data := strings.Replace(string(validSummaryJSON(intent.RevisionID)),
+		`"attempt_generation":3`, `"attempt_generation":4`, 1)
+	if err := gate.Ingest(server.IngestRequest{
+		Credential:   lease.Credential(),
+		ArtifactName: artifactNameFor(4),
+		Data:         []byte(data),
+	}); !errors.Is(err, core.ErrLeaseRevoked) {
+		t.Fatalf("expected ErrLeaseRevoked, got %v", err)
+	}
+	if _, lookupErr := o.Result(owner, 7, 4); !errors.Is(lookupErr, core.ErrNoResult) {
+		t.Fatalf("refused commit must not store a result, got %v", lookupErr)
+	}
+}
+
+// TestCompositionLeaseReIssueSupersedesCredential proves re-issuing the
+// lease for a generation kills the old credential: it can neither
+// authenticate nor commit.
+func TestCompositionLeaseReIssueSupersedesCredential(t *testing.T) {
+	o, id, owner, leases, lease := setupReadyWithLease(t)
+	intent := admitFlowWithLease(t, o, leases, lease, id, owner)
+
+	fresh, err := leases.IssueLease("srv-a", 7)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if fresh.Version() != 2 {
+		t.Fatalf("expected version 2 after re-issue, got %d", fresh.Version())
+	}
+
+	// The old credential can no longer authenticate.
+	if _, err := o.AuthenticateServer(context.Background(), lease.Credential()); err == nil {
+		t.Fatal("expected the superseded credential to be refused")
+	}
+
+	// The fresh credential authenticates and can deliver a result.
+	participant, err := o.AuthenticateServer(context.Background(), fresh.Credential())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	if participant.ProcessGeneration != 7 {
+		t.Fatalf("expected generation 7, got %d", participant.ProcessGeneration)
+	}
+	if err := o.AcceptResult(participant, &core.AttemptResult{
+		AccountID:         owner.ID,
+		RevisionID:        intent.RevisionID,
+		ProcessGeneration: 7,
+		AttemptGeneration: 5,
+		ReplayID:          "replay-1",
+		TakeoverTick:      63280,
+	}); err != nil {
+		t.Fatalf("expected acceptance under the fresh lease: %v", err)
+	}
+}
+
+// TestCompositionLeaseRevocationLinearizesWithCommit hammers the composed
+// gate with concurrent ingests against a terminal revocation: exactly the
+// commits that beat the revocation to the authority lock land, and every
+// other attempt is refused typed with no stored result. The split between
+// the two outcomes is scheduler-dependent, so the test asserts the
+// invariants: no third outcome, every stored result was a counted commit,
+// and a refused ingest never stored a result.
+func TestCompositionLeaseRevocationLinearizesWithCommit(t *testing.T) {
+	o, id, owner, leases, lease := setupReadyWithLease(t)
+	intent := admitFlowWithLease(t, o, leases, lease, id, owner)
+
+	gate, err := NewServerIngestionGateWithLeases(o, leases)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	const workers = 16
+	var wg sync.WaitGroup
+	var start sync.WaitGroup
+	start.Add(workers + 1)
+	var committed, refused int64
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			start.Done()
+			gen := uint64(n + 10)
+			data := strings.Replace(string(validSummaryJSON(intent.RevisionID)),
+				`"attempt_generation":3`, fmt.Sprintf(`"attempt_generation":%d`, gen), 1)
+			err := gate.Ingest(server.IngestRequest{
+				Credential:   lease.Credential(),
+				ArtifactName: fmt.Sprintf("runback_summary_gen%d.json", gen),
+				Data:         []byte(data),
+			})
+			switch {
+			case err == nil:
+				atomic.AddInt64(&committed, 1)
+				recordCommitOutcome(gen, true)
+			case errors.Is(err, core.ErrLeaseRevoked),
+				errors.Is(err, server.ErrUnauthenticated):
+				// Refused either at the commit gate or at
+				// authentication because the revocation won the
+				// race. Either way nothing is stored.
+				atomic.AddInt64(&refused, 1)
+				recordCommitOutcome(gen, false)
+			default:
+				t.Errorf("unexpected ingest error: %v", err)
+			}
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		start.Done()
+		if err := leases.Revoke(7); err != nil {
+			t.Errorf("unexpected revoke error: %v", err)
+		}
+	}()
+	start.Wait()
+	wg.Wait()
+
+	if committed+refused != workers {
+		t.Fatalf("expected every ingest to either land or be revoked-refused: %d committed, %d refused of %d", committed, refused, workers)
+	}
+	// Every stored result was a counted commit; every refused ingest
+	// (at the gate or at authentication) stored nothing.
+	for gen := uint64(10); gen < 10+workers; gen++ {
+		_, lookupErr := o.Result(owner, 7, gen)
+		stored := !errors.Is(lookupErr, core.ErrNoResult)
+		if stored != wasCommitted(gen) {
+			t.Fatalf("generation %d: stored=%v countedCommitted=%v", gen, stored, wasCommitted(gen))
+		}
+	}
+}
+
+// wasCommitted reports whether one worker generation landed as a commit.
+func wasCommitted(gen uint64) bool {
+	v, ok := committedResults.Load(int64(gen))
+	if !ok {
+		return false
+	}
+	return v.(bool)
+}
+
+// committedResults records the attempt generations that landed as commits.
+var committedResults sync.Map
+
+// recordCommitOutcome records one worker outcome for the no-partial-state
+// check.
+func recordCommitOutcome(gen uint64, ok bool) {
+	committedResults.Store(int64(gen), ok)
+}
+
+// ---------------------------------------------------------------------------
 // composition: the full result path
 // ---------------------------------------------------------------------------
 

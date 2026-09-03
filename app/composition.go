@@ -43,11 +43,36 @@ func (a serverGateAdapter) ResolveParticipant(ctx context.Context, credential st
 // summary is delivered to the orchestrator's result acceptance path with the
 // authenticated participant. No account identity is accepted from callers.
 func NewServerIngestionGate(orch *orchestrator.Orchestrator) (*server.SummaryIngestionGate, error) {
+	return newServerIngestionGate(orch)
+}
+
+// NewServerIngestionGateWithLeases composes the gate over an orchestrator
+// whose server authority is a generation-scoped server lease authority. The
+// AcceptResult commit is gated on the live lease of the artifact's process
+// generation inside the orchestrator: the liveness check and the commit run
+// under one lock, so a terminal revocation is linearizable with result
+// acceptance. A revoked generation can never commit a result, and a
+// committed result always stands. The lease authority itself is injected
+// into the orchestrator; this constructor validates the wiring and refuses
+// a nil authority rather than composing a gate that cannot fence commits.
+func NewServerIngestionGateWithLeases(
+	orch *orchestrator.Orchestrator,
+	leases *core.ServerLeaseAuthority,
+) (*server.SummaryIngestionGate, error) {
+	if leases == nil {
+		return nil, fmt.Errorf("%w: lease authority is required", server.ErrInvalidSpec)
+	}
+	return newServerIngestionGate(orch)
+}
+
+// newServerIngestionGate builds the composed gate. Lease gating of the
+// acceptance commit lives in the orchestrator's AcceptResult, the single
+// linearization point shared by every result path.
+func newServerIngestionGate(orch *orchestrator.Orchestrator) (*server.SummaryIngestionGate, error) {
 	if orch == nil {
 		return nil, fmt.Errorf("%w: orchestrator is required", server.ErrInvalidSpec)
 	}
-	return server.NewSummaryIngestionGate(
-		serverGateAdapter{orch: orch},
+	return server.NewSummaryIngestionGate(serverGateAdapter{orch: orch},
 		func(participant *core.ServerParticipant, summary *server.TerminalSummary) error {
 			// The summary carries no account: the account of the
 			// result is a fact of the admission, not of the
@@ -64,6 +89,10 @@ func NewServerIngestionGate(orch *orchestrator.Orchestrator) (*server.SummaryIng
 				ReplayID:          summary.ReplayIdentity,
 				TakeoverTick:      summary.TakeoverTick,
 			})
-		},
-	)
+		})
 }
+
+// The lease authority matches the orchestrator ServerAuthority shape, so a
+// deployment can wire one concrete authority as both the server credential
+// source and the revocation gate.
+var _ orchestrator.ServerAuthority = (*core.ServerLeaseAuthority)(nil)

@@ -242,6 +242,16 @@ func (o *Orchestrator) AcceptResult(participant *ServerParticipant, result *core
 	if adm.revisionID != result.RevisionID {
 		return core.ErrRevisionMismatch
 	}
+	// When the server authority carries the lease-commit capability, the
+	// store operation is gated on the live lease of the process
+	// generation: the liveness check and the store run under one lock, so
+	// a terminal revocation is linearizable with acceptance. A refused
+	// gate never stores and leaves no trace.
+	if committer := o.leaseCommitter(); committer != nil {
+		return committer.CommitLease(participant.ProcessGeneration, func() error {
+			return o.results.Accept(result)
+		})
+	}
 	return o.results.Accept(result)
 }
 
