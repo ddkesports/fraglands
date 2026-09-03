@@ -24,6 +24,10 @@ type Orchestrator struct {
 	identities IdentityAuthority
 	// servers authenticates server process credentials.
 	servers ServerAuthority
+	// grants mints and revokes replay authorization grants. Required: a
+	// preparation without a grant can never fetch its replay, so an
+	// orchestrator without an authority cannot serve the runback path.
+	grants core.GrantAuthority
 	// ctx is the orchestrator lifetime: preparation and allocation watchers
 	// stop when it is cancelled.
 	ctx context.Context
@@ -68,7 +72,14 @@ func NewOrchestrator(
 	allocator ProcessAllocator,
 	identities IdentityAuthority,
 	servers ServerAuthority,
-) *Orchestrator {
+	grants core.GrantAuthority,
+) (*Orchestrator, error) {
+	// Authorization is not optional: a deployment without a grant authority
+	// cannot issue authorized fetches, so construction is refused rather
+	// than silently serving unauthorized replay access.
+	if grants == nil {
+		return nil, ErrGrantAuthorityRequired
+	}
 	return &Orchestrator{
 		ctx:           ctx,
 		preparer:      preparer,
@@ -85,5 +96,6 @@ func NewOrchestrator(
 		invites:       make(map[string]*Invitation),
 		results:       core.NewResultStore(),
 		sources:       sources,
-	}
+		grants:        grants,
+	}, nil
 }

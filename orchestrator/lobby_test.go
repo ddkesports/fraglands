@@ -16,7 +16,7 @@ func setupReady(t *testing.T) (*Orchestrator, string, *core.Account, *core.Accou
 
 	owner, other := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority())
+	o, err := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
 
 	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {

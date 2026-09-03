@@ -72,9 +72,22 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	orch := orchestrator.NewOrchestrator(ctx, nil, &noopPreparer{}, &noopAllocator{}, &staticIdentityAuthority{
+	// The development binary uses a real HMAC grant authority so that the
+	// authorization contract is exercised end to end even in development.
+	grantAuthority, err := core.NewHMACGrantAuthority(core.GrantAuthorityConfig{
+		Clock: time.Now,
+		TTL:   30 * time.Minute,
+	})
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+
+	orch, err := orchestrator.NewOrchestrator(ctx, nil, &noopPreparer{}, &noopAllocator{}, &staticIdentityAuthority{
 		accounts: map[string]*core.Account{},
-	}, &noopServerAuthority{})
+	}, &noopServerAuthority{}, grantAuthority)
+	if err != nil {
+		log.Fatal(err.Error())
+	}
 	console, err := web.NewWeb(orch)
 	if err != nil {
 		log.Fatal(err.Error())

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/paralin/fraglands/core"
@@ -115,3 +116,45 @@ func testServerAuthority() *mockServerAuthority {
 		"scred-b": p2,
 	}}
 }
+
+// mockGrantAuthority delegates to a real HMAC authority (so Mint and
+// Verify behave exactly as in production) while recording calls so tests
+// can assert on how the authorization seam was used.
+type mockGrantAuthority struct {
+	mtx      sync.Mutex
+	inner    core.GrantAuthority
+	verifies []core.ReplayRequest
+	revoked  []string
+}
+
+func newMockGrantAuthority() *mockGrantAuthority {
+	a, err := core.NewHMACGrantAuthority(core.GrantAuthorityConfig{Clock: time.Now, TTL: time.Hour})
+	if err != nil {
+		panic(err.Error())
+	}
+	return &mockGrantAuthority{inner: a}
+}
+
+// Mint delegates to the real authority.
+func (m *mockGrantAuthority) Mint(preparationID, ownerAccountID, replayID string) (*core.ReplayGrant, error) {
+	return m.inner.Mint(preparationID, ownerAccountID, replayID)
+}
+
+// Verify records the request, then delegates to the real authority.
+func (m *mockGrantAuthority) Verify(req core.ReplayRequest) error {
+	m.mtx.Lock()
+	m.verifies = append(m.verifies, req)
+	m.mtx.Unlock()
+	return m.inner.Verify(req)
+}
+
+// Revoke records the revocation, then delegates to the real authority.
+func (m *mockGrantAuthority) Revoke(preparationID string) error {
+	m.mtx.Lock()
+	m.revoked = append(m.revoked, preparationID)
+	m.mtx.Unlock()
+	return m.inner.Revoke(preparationID)
+}
+
+// testGrantAuthority returns a fresh mock grant authority.
+func testGrantAuthority() *mockGrantAuthority { return newMockGrantAuthority() }

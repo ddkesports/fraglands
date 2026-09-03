@@ -35,7 +35,7 @@ func TestPrepareLifecycle(t *testing.T) {
 
 	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1", DisplayName: "Replay One", FileName: "one.dem"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority())
+	o, _ := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
 
 	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {
@@ -75,7 +75,7 @@ func TestPrepareUnknownReplay(t *testing.T) {
 
 	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority())
+	o, _ := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
 
 	if _, err := o.Prepare(owner, "replay-other", 0, 63280); err != ErrUnknownReplay {
 		t.Fatalf("expected ErrUnknownReplay, got %v", err)
@@ -91,7 +91,7 @@ func TestPrepareFailureTypedReason(t *testing.T) {
 
 	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{fail: true}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority())
+	o, _ := NewOrchestrator(ctx, sources, &mockPreparer{fail: true}, &mockAllocator{}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
 
 	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestPrepareAllocationFailure(t *testing.T) {
 
 	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{fail: true}, testIdentityAuthority(), testServerAuthority())
+	o, _ := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{fail: true}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
 
 	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {

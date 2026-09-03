@@ -20,6 +20,9 @@ func (o *Orchestrator) Prepare(
 		return "", ErrUnauthenticated
 	}
 
+	// Reserve the preparation ID and check the authenticated catalog in one
+	// locked step. The preparation record is created only after the grant
+	// mints, so a mint failure orphans nothing.
 	var id string
 	var accepted bool
 	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
@@ -34,19 +37,34 @@ func (o *Orchestrator) Prepare(
 		}
 		o.prepSeq++
 		id = prepID(o.prepSeq)
-		prep := core.NewScenarioPreparation(id, replayID, leadInStartTick, takeoverTick)
-		o.preparations[id] = prep
-		o.owners[id] = principal.ID
-		lobby, _ := core.NewLobby("lobby-"+id, defaultLobbyCapacity)
-		o.lobbies[id] = lobby
 	})
 	if !accepted {
 		return "", ErrUnknownReplay
 	}
 
+	// Mint the replay grant only after the replay passed the authenticated
+	// catalog check. The grant is atomically bound to this preparation ID,
+	// the owner account, and the replay ID, and expires by the authority's
+	// configured TTL.
+	grant, err := o.grants.Mint(id, principal.ID, replayID)
+	if err != nil {
+		return "", err
+	}
+
+	// Attach the immutable grant privately to the preparation, register the
+	// preparation, and start the preparer. No grant exists without a
+	// preparation and no preparation exists without its grant.
+	prep := core.NewScenarioPreparation(id, replayID, leadInStartTick, takeoverTick, grant)
+	o.bcast.HoldLock(func(broadcast func(), _ func() <-chan struct{}) {
+		o.preparations[id] = prep
+		o.owners[id] = principal.ID
+		lobby, _ := core.NewLobby("lobby-"+id, defaultLobbyCapacity)
+		o.lobbies[id] = lobby
+		broadcast()
+	})
+
 	// Run the preparer off the request path: the caller watches the
 	// preparation lifecycle instead of blocking on the provider.
-	prep := o.preparation(id)
 	go o.runPreparer(o.ctx, prep)
 	return id, nil
 }
@@ -126,7 +144,8 @@ func (o *Orchestrator) runPreparer(ctx context.Context, prep *core.ScenarioPrepa
 	}
 	if state != core.PreparationReady {
 		// Failed and cancelled carry their typed reason on the preparation
-		// itself; nothing is allocated.
+		// itself; nothing is allocated. The grant is no longer usable.
+		_ = o.grants.Revoke(prep.ID)
 		return
 	}
 
@@ -146,6 +165,37 @@ func (o *Orchestrator) runPreparer(ctx context.Context, prep *core.ScenarioPrepa
 		}
 		broadcast()
 	})
+}
+
+// CancelPreparation cancels the caller's own non-terminal preparation. The
+// preparation is marked cancelled and its replay grant is revoked so it can
+// never be used to fetch replay bytes.
+func (o *Orchestrator) CancelPreparation(principal *core.Account, prepID string) error {
+	if principal == nil {
+		return ErrUnauthenticated
+	}
+	var (
+		prep  *core.ScenarioPreparation
+		owner bool
+		found bool
+	)
+	o.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
+		prep, found = o.preparations[prepID]
+		if !found {
+			return
+		}
+		owner = o.owners[prepID] == principal.ID
+	})
+	if !found {
+		return ErrUnknownPreparation
+	}
+	if !owner {
+		return ErrForbidden
+	}
+	if err := prep.MarkCancelled(); err != nil {
+		return err
+	}
+	return o.grants.Revoke(prepID)
 }
 
 // preparation returns the preparation record by ID, or nil.

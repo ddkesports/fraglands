@@ -261,7 +261,7 @@ func TestPrepareScenarioWiresFactsIntoRevision(t *testing.T) {
 	// an immutable revision comes out. No possession, bots, or native mutation
 	// anywhere in the path.
 	facts := runbackFactsFixture()
-	prep := NewScenarioPreparation("prep-1", "replay-1", 0, 63280)
+	prep := NewScenarioPreparation("prep-1", "replay-1", 0, 63280, nil)
 
 	rev, omissions, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5, 1.0/64.0)
 	if err != nil {
@@ -292,7 +292,7 @@ func TestPrepareScenarioFailsClosedWithTypedReason(t *testing.T) {
 	facts := runbackFactsFixture()
 	facts.Heroes[0].Facing[2] = analysis.RunbackFloat{MissingReason: analysis.RunbackMissingNotRecorded}
 
-	prep := NewScenarioPreparation("prep-2", "replay-1", 0, 63280)
+	prep := NewScenarioPreparation("prep-2", "replay-1", 0, 63280, nil)
 	_, _, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5, 1.0/64.0)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -319,7 +319,7 @@ func TestPrepareScenarioRefusalFailsClosed(t *testing.T) {
 	facts := runbackFactsFixture()
 	facts.Tick = 0 // malformed: no moment selected
 
-	prep := NewScenarioPreparation("prep-3", "replay-1", 0, 0)
+	prep := NewScenarioPreparation("prep-3", "replay-1", 0, 0, nil)
 	_, _, err := PrepareScenario(prep, facts, DefaultRunbackCapabilities(), 5, 1.0/64.0)
 	if err == nil {
 		t.Fatal("expected a typed failure")

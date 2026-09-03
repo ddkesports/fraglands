@@ -70,7 +70,7 @@ func setupReady(t *testing.T) (*orchestrator.Orchestrator, string, *core.Account
 
 	owner := &core.Account{ID: "acct-a", SteamID: 76561198000000001, DisplayName: "Owner"}
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := orchestrator.NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, &mockIdentityAuthority{}, &mockServerAuthority{})
+	o, err := orchestrator.NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{}, &mockIdentityAuthority{}, &mockServerAuthority{}, testGrantAuthority())
 
 	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {
@@ -506,4 +506,16 @@ func TestCompositionRefusalLeavesNoPartialState(t *testing.T) {
 	if _, err := o.Result(owner, 7, 3); err != nil {
 		t.Fatalf("expected stored result after successful retry: %v", err)
 	}
+}
+
+// testGrantAuthority returns a fresh in-memory grant authority for tests.
+func testGrantAuthority() core.GrantAuthority {
+	a, err := core.NewHMACGrantAuthority(core.GrantAuthorityConfig{
+		Clock: time.Now,
+		TTL:   time.Hour,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	return a
 }

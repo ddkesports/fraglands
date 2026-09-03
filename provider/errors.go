@@ -1,6 +1,10 @@
 package provider
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/paralin/fraglands/core"
+)
 
 // Typed failures. Each maps to one stable reason code on the preparation and
 // never carries partial state.
@@ -34,7 +38,29 @@ var (
 	// ErrNilProvider is returned when a Preparer is constructed without a
 	// provider.
 	ErrNilProvider = errors.New("provider: nil provider")
+	// ErrGrantAuthorityRequired is returned when a provider is constructed
+	// without a grant authority. Authorization is mandatory.
+	ErrGrantAuthorityRequired = errors.New("provider: grant authority is required")
+	// ErrGrantRequired is returned when a preparation carries no replay
+	// grant: the store is never called without authorization.
+	ErrGrantRequired = errors.New("provider: preparation carries no replay grant")
 )
+
+// grantRefusalCode maps one typed grant refusal to its stable reason code.
+func grantRefusalCode(err error) string {
+	switch {
+	case errors.Is(err, core.ErrGrantExpired):
+		return "grant_expired"
+	case errors.Is(err, core.ErrGrantRevoked):
+		return "grant_revoked"
+	case errors.Is(err, core.ErrGrantAlreadyUsed):
+		return "grant_already_used"
+	case errors.Is(err, core.ErrGrantMismatch):
+		return "grant_mismatch"
+	default:
+		return "grant_unknown"
+	}
+}
 
 // FailureCode maps a typed cause to the stable reason code carried on the
 // preparation failure.
@@ -56,6 +82,10 @@ func FailureCode(err error) string {
 		return "store_required"
 	case errors.Is(err, ErrPreparationTerminal):
 		return "preparation_terminal"
+	case errors.Is(err, ErrGrantRequired), errors.Is(err, ErrGrantAuthorityRequired):
+		return "grant_required"
+	case core.IsGrantRefusal(err):
+		return grantRefusalCode(err)
 	default:
 		return "provider_failed"
 	}

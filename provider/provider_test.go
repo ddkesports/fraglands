@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/paralin/fraglands/core"
 	"github.com/paralin/s2replay/analysis"
@@ -26,15 +27,15 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{replays: make(map[string][]byte)}
 }
 
-func (f *fakeStore) Replay(_ context.Context, id string) (io.ReadCloser, error) {
-	f.calls = append(f.calls, id)
-	if f.failOn == id {
+func (f *fakeStore) Replay(_ context.Context, req core.ReplayRequest) (io.ReadCloser, error) {
+	f.calls = append(f.calls, req.ReplayID)
+	if f.failOn == req.ReplayID {
 		if f.failWith != nil {
 			return nil, f.failWith
 		}
 		return nil, ErrReplayNotFound
 	}
-	data, ok := f.replays[id]
+	data, ok := f.replays[req.ReplayID]
 	if !ok {
 		return nil, ErrReplayNotFound
 	}
@@ -102,15 +103,49 @@ func fakeProber(demo []byte) (float64, error) {
 }
 
 func newTestProvider(store ReplayStore, facts FactsExtractor) *Provider {
-	p := New(store, facts, 5)
+	grants := newTestAuthority()
+	p, err := New(grants, store, facts, 5)
+	if err != nil {
+		panic(err.Error())
+	}
 	p.prober = fakeProber
 	return p
 }
 
+// newTestAuthority returns a fresh HMAC grant authority with a fixed clock
+// and a 1 hour TTL.
+func newTestAuthority() *core.HMACGrantAuthority {
+	t := time.Now()
+	a, err := core.NewHMACGrantAuthority(core.GrantAuthorityConfig{
+		Clock: func() time.Time { return t },
+		TTL:   time.Hour,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	return a
+}
+
+// newAuthorizedPreparation mints a grant for the preparation and returns the
+// preparation holding it privately, as the orchestrator would.
+func newAuthorizedPreparation(authority *core.HMACGrantAuthority, id, replayID string, takeover uint32) *core.ScenarioPreparation {
+	grant, err := authority.Mint(id, "acct-a", replayID)
+	if err != nil {
+		panic(err.Error())
+	}
+	return core.NewScenarioPreparation(id, replayID, 0, takeover, grant)
+}
+
 func TestPrepareRequiresStore(t *testing.T) {
-	p := New(nil, fakeFacts, 5)
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
-	err := p.Prepare(context.Background(), prep)
+	p, err := New(nil, newFakeStore(), fakeFacts, 5)
+	if err == nil {
+		t.Fatal("expected failure when authority is nil")
+	}
+	if !errors.Is(err, ErrGrantAuthorityRequired) {
+		t.Fatalf("expected ErrGrantAuthorityRequired, got %v", err)
+	}
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
+	err = p.Prepare(context.Background(), prep)
 	if err == nil {
 		t.Fatal("expected failure when store is nil")
 	}
@@ -130,7 +165,7 @@ func TestPrepareRequiresTakeoverTick(t *testing.T) {
 	store.add("replay-1", []byte("demo-bytes"))
 	p := newTestProvider(store, fakeFacts)
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 0)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 0)
 	err := p.Prepare(context.Background(), prep)
 	if err == nil {
 		t.Fatal("expected failure when takeover tick is zero")
@@ -149,7 +184,7 @@ func TestPrepareFailsOnStoreDenial(t *testing.T) {
 	store.failWith = ErrReplayNotFound
 	p := newTestProvider(store, fakeFacts)
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	err := p.Prepare(context.Background(), prep)
 	if err == nil {
 		t.Fatal("expected failure when store denies access")
@@ -170,7 +205,7 @@ func TestPrepareFailsOnUnreadableStream(t *testing.T) {
 	// stream without adding a second fake type.
 	p.maxRead = 4
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	err := p.Prepare(context.Background(), prep)
 	if err == nil {
 		t.Fatal("expected failure on truncated read")
@@ -188,7 +223,7 @@ func TestPrepareFailsOnExtractionError(t *testing.T) {
 	store.add("replay-1", []byte("demo-bytes"))
 	p := newTestProvider(store, failingFacts)
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	err := p.Prepare(context.Background(), prep)
 	if err == nil {
 		t.Fatal("expected failure when extraction fails")
@@ -207,13 +242,19 @@ func TestPrepareFailsWhenTickIntervalNotProven(t *testing.T) {
 
 	// fakeFacts does not consult the parser; the interval gate must fail the
 	// preparation before any facts can be compiled.
-	p := New(store, fakeFacts, 5)
+	p, perr := New(newTestAuthority(), store, fakeFacts, 5)
+	if perr != nil {
+		t.Fatal(perr.Error())
+	}
 	// Bypass the real extractFacts: use a store that returns a minimal
 	// non-PBDEMS2 payload so NewParser fails inside provenTickInterval.
 	store.replays["replay-1"] = []byte("not-a-demo")
-	p2 := New(store, fakeFacts, 5)
+	p2, p2err := New(newTestAuthority(), store, fakeFacts, 5)
+	if p2err != nil {
+		t.Fatal(p2err.Error())
+	}
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	err := p2.Prepare(context.Background(), prep)
 	if err == nil {
 		t.Fatal("expected failure when interval cannot be proven")
@@ -232,7 +273,7 @@ func TestPrepareProducesReadyRevision(t *testing.T) {
 	store.add("replay-1", []byte("demo-bytes"))
 	p := newTestProvider(store, fakeFacts)
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	if err := p.Prepare(context.Background(), prep); err != nil {
 		t.Fatal(err.Error())
 	}
@@ -262,7 +303,7 @@ func TestPrepareIsIdempotentOnTerminalPreparation(t *testing.T) {
 	store.add("replay-1", []byte("demo-bytes"))
 	p := newTestProvider(store, fakeFacts)
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	if err := p.Prepare(context.Background(), prep); err != nil {
 		t.Fatal(err.Error())
 	}
@@ -289,7 +330,7 @@ func TestPrepareHonoursContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	err := p.Prepare(ctx, prep)
 	if err == nil {
 		t.Fatal("expected failure on cancelled context")
