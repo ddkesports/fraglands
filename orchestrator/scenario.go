@@ -223,6 +223,17 @@ func prepID(seq int) string {
 // identity facts. A failed upload never becomes a result because acceptance
 // is the single store operation.
 func (o *Orchestrator) AcceptResult(participant *ServerParticipant, result *core.AttemptResult) error {
+	return o.acceptResult(participant, result, true)
+}
+
+// AcceptResultAfterLease accepts a result from a callback already running
+// inside the authority's exact credential lease transaction. It performs all
+// admission and identity checks but does not nest another lease lock.
+func (o *Orchestrator) AcceptResultAfterLease(participant *ServerParticipant, result *core.AttemptResult) error {
+	return o.acceptResult(participant, result, false)
+}
+
+func (o *Orchestrator) acceptResult(participant *ServerParticipant, result *core.AttemptResult, fence bool) error {
 	if participant == nil {
 		return ErrUnauthenticated
 	}
@@ -242,17 +253,13 @@ func (o *Orchestrator) AcceptResult(participant *ServerParticipant, result *core
 	if adm.revisionID != result.RevisionID {
 		return core.ErrRevisionMismatch
 	}
-	// When the server authority carries the lease-commit capability, the
-	// store operation is gated on the live lease of the process
-	// generation: the liveness check and the store run under one lock, so
-	// a terminal revocation is linearizable with acceptance. A refused
-	// gate never stores and leaves no trace.
-	if committer := o.leaseCommitter(); committer != nil {
-		return committer.CommitLease(participant.ProcessGeneration, func() error {
-			return o.results.Accept(result)
-		})
+	commit := func() error { return o.results.Accept(result) }
+	if fence {
+		if committer := o.leaseCommitter(); committer != nil {
+			return committer.CommitLease(participant.ProcessGeneration, commit)
+		}
 	}
-	return o.results.Accept(result)
+	return commit()
 }
 
 // admissionFor returns the admission record for one account on one process

@@ -227,6 +227,29 @@ func (a *ServerLeaseAuthority) CommitLease(generation uint64, commit func() erro
 	return commit()
 }
 
+// CommitCredential executes commit iff the presented credential is the
+// currently active, unrevoked lease for generation. The credential identity
+// and commit are checked under one lock, so re-issue and terminal revocation
+// cannot allow an operation authenticated by an older lease to commit.
+func (a *ServerLeaseAuthority) CommitCredential(credential string, generation uint64, commit func() error) error {
+	if commit == nil {
+		return ErrLeaseCommitRequired
+	}
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	record, ok := a.credentials[credential]
+	if !ok || record.generation != generation {
+		return ErrLeaseUnknown
+	}
+	if record.revoked {
+		return ErrLeaseRevoked
+	}
+	if a.active[generation] != record {
+		return ErrLeaseUnknown
+	}
+	return commit()
+}
+
 // newLeaseCredential generates a fresh opaque credential token. Callers
 // must hold the authority lock.
 func newLeaseCredential(taken map[string]*serverLeaseRecord) (string, error) {

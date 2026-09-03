@@ -37,6 +37,12 @@ func (a serverGateAdapter) ResolveParticipant(ctx context.Context, credential st
 	return participant, nil
 }
 
+// CommitCredential preserves the outer application's authority boundary while
+// allowing the gate to revalidate the exact bearer lease at commit time.
+func (a serverGateAdapter) CommitCredential(credential string, generation uint64, commit func() error) error {
+	return a.orch.CommitServerCredential(credential, generation, commit)
+}
+
 // NewServerIngestionGate composes a SummaryIngestionGate with the
 // orchestrator at the outer application boundary. Credential authentication
 // runs through the orchestrator's real ServerAuthority, and the decoded
@@ -72,8 +78,8 @@ func newServerIngestionGate(orch *orchestrator.Orchestrator) (*server.SummaryIng
 	if orch == nil {
 		return nil, fmt.Errorf("%w: orchestrator is required", server.ErrInvalidSpec)
 	}
-	return server.NewSummaryIngestionGate(serverGateAdapter{orch: orch},
-		func(participant *core.ServerParticipant, summary *server.TerminalSummary) error {
+	return server.NewSummaryIngestionGateWithCredentialCommit(serverGateAdapter{orch: orch},
+		func(_ string, participant *core.ServerParticipant, summary *server.TerminalSummary) error {
 			// The summary carries no account: the account of the
 			// result is a fact of the admission, not of the
 			// artifact. The orchestrator attributes it.
@@ -81,7 +87,7 @@ func newServerIngestionGate(orch *orchestrator.Orchestrator) (*server.SummaryIng
 			if err != nil {
 				return err
 			}
-			return orch.AcceptResult(participant, &core.AttemptResult{
+			return orch.AcceptResultAfterLease(participant, &core.AttemptResult{
 				AccountID:         accountID,
 				RevisionID:        summary.Revision,
 				ProcessGeneration: summary.ServerProcessGeneration,
