@@ -40,6 +40,26 @@ type LeaseCommitter interface {
 	CommitLease(processGeneration uint64, commit func() error) error
 }
 
+// CredentialLeaseCommitter is the stronger optional authority capability. It
+// revalidates the presented credential (including its lease version) in the
+// same transaction as the commit.
+type CredentialLeaseCommitter interface {
+	CommitCredential(credential string, processGeneration uint64, commit func() error) error
+}
+
+// CommitServerCredential runs a result commit under the exact presented
+// server credential when the authority supports lease credentials. Older
+// authorities fall back to generation fencing.
+func (o *Orchestrator) CommitServerCredential(credential string, processGeneration uint64, commit func() error) error {
+	if committer, ok := o.servers.(CredentialLeaseCommitter); ok {
+		return committer.CommitCredential(credential, processGeneration, commit)
+	}
+	if committer, ok := o.servers.(LeaseCommitter); ok {
+		return committer.CommitLease(processGeneration, commit)
+	}
+	return commit()
+}
+
 // leaseCommitter returns the authority's lease-commit capability, or nil.
 func (o *Orchestrator) leaseCommitter() LeaseCommitter {
 	if committer, ok := o.servers.(LeaseCommitter); ok {

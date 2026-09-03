@@ -27,6 +27,9 @@ type SummaryIngestionGate struct {
 	// Acceptance is the single store operation: a failed accept leaves no
 	// trace.
 	accept SummaryAccept
+	// acceptCredential is used by compositions whose acceptance callback must
+	// run inside the exact credential lease transaction.
+	acceptCredential SummaryAcceptCredential
 
 	// seenArtifacts records artifact content digests already ingested, so a
 	// re-delivered or replayed artifact is refused even if its file name
@@ -44,10 +47,22 @@ type ServerParticipantResolver interface {
 	ResolveParticipant(ctx context.Context, credential string) (*core.ServerParticipant, error)
 }
 
+// ServerCredentialCommitter is an optional capability paired with a
+// participant resolver. Implementations revalidate the exact credential and
+// lease version in the same transaction as the acceptance commit. Resolvers
+// without this capability retain the existing generation-gated accept path.
+type ServerCredentialCommitter interface {
+	CommitCredential(credential string, generation uint64, commit func() error) error
+}
+
 // SummaryAccept delivers one accepted summary, bound to its authenticated
 // server participant, to the result acceptance path. Acceptance is the
 // single store operation: a failed accept leaves no trace.
 type SummaryAccept func(participant *core.ServerParticipant, summary *TerminalSummary) error
+
+// SummaryAcceptCredential is the credential-aware acceptance seam. It is
+// invoked only inside the resolver's exact credential commit transaction.
+type SummaryAcceptCredential func(credential string, participant *core.ServerParticipant, summary *TerminalSummary) error
 
 // NewSummaryIngestionGate constructs an ingestion gate over the injected
 // participant resolver and acceptance callback.
@@ -66,6 +81,26 @@ func NewSummaryIngestionGate(
 		accept:        accept,
 		seenArtifacts: make(map[string]bool),
 	}, nil
+}
+
+// NewSummaryIngestionGateWithCredentialCommit constructs a gate whose
+// credential-aware callback runs inside the exact lease commit transaction.
+// This avoids nesting the generation acceptance gate around the callback.
+func NewSummaryIngestionGateWithCredentialCommit(
+	participants ServerParticipantResolver,
+	accept SummaryAcceptCredential,
+) (*SummaryIngestionGate, error) {
+	if accept == nil {
+		return nil, fmt.Errorf("%w: credential accept callback is required", ErrInvalidSpec)
+	}
+	gate, err := NewSummaryIngestionGate(participants, func(*core.ServerParticipant, *TerminalSummary) error {
+		return fmt.Errorf("%w: credential-aware callback required", ErrInvalidSpec)
+	})
+	if err != nil {
+		return nil, err
+	}
+	gate.acceptCredential = accept
+	return gate, nil
 }
 
 // IngestRequest is one authenticated ingestion request for a spool artifact.
@@ -139,13 +174,27 @@ func (g *SummaryIngestionGate) Ingest(req IngestRequest) error {
 	g.seenArtifacts[digest] = true
 	g.mtx.Unlock()
 
-	// 8. Accept: the single store operation. A failed accept rolls back the
-	//    digest reservation so a retry is possible and no trace remains.
-	if err := g.accept(participant, summary); err != nil {
+	// 8. Accept: the single store operation. Lease-aware resolvers revalidate
+	//    the exact credential and its lease version around this commit;
+	//    otherwise the composed authority's generation gate remains the
+	//    authority boundary.
+	commit := func() error {
+		if g.acceptCredential != nil {
+			return g.acceptCredential(req.Credential, participant, summary)
+		}
+		return g.accept(participant, summary)
+	}
+	var acceptErr error
+	if committer, ok := g.participants.(ServerCredentialCommitter); ok {
+		acceptErr = committer.CommitCredential(req.Credential, participant.ProcessGeneration, commit)
+	} else {
+		acceptErr = commit()
+	}
+	if acceptErr != nil {
 		g.mtx.Lock()
 		delete(g.seenArtifacts, digest)
 		g.mtx.Unlock()
-		return err
+		return acceptErr
 	}
 	return nil
 }
