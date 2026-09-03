@@ -133,7 +133,10 @@ func testServer(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator) {
 		DisplayName: "Mid Boss Fight",
 		FileName:    "mid-boss.dem",
 	}}
-	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{}, testIdentityAuthority(), testServerAuthority())
+	orch, err := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	t.Cleanup(server.Close)
 	return server, orch
@@ -564,9 +567,12 @@ func TestEndToEndFailedPreparation(t *testing.T) {
 	defer cancel()
 
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{
+	orch, err := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{
 		failWith: &core.FailureReason{Code: "replay_unsupported", Message: "field kHealth unsupported"},
-	}, &fakeAllocator{}, testIdentityAuthority(), testServerAuthority())
+	}, &fakeAllocator{}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	defer server.Close()
 
@@ -611,9 +617,12 @@ func TestEndToEndAllocationFailure(t *testing.T) {
 	defer cancel()
 
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{
+	orch, err := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{
 		fail: errors.New("no worker capacity in region"),
-	}, testIdentityAuthority(), testServerAuthority())
+	}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	defer server.Close()
 
@@ -651,9 +660,12 @@ func TestAllocationErrorTypedThroughAPI(t *testing.T) {
 	defer cancel()
 
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{
+	orch, err := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{
 		fail: errors.New("no worker capacity in region"),
-	}, testIdentityAuthority(), testServerAuthority())
+	}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 	server := httptest.NewServer(NewAPI(orch).Handler())
 	defer server.Close()
 
@@ -719,4 +731,16 @@ func TestEndToEndJoinIntentGuards(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("expected 201 for join intent, got %d: %v", code, body)
 	}
+}
+
+// testGrantAuthority returns a fresh in-memory grant authority for tests.
+func testGrantAuthority() core.GrantAuthority {
+	a, err := core.NewHMACGrantAuthority(core.GrantAuthorityConfig{
+		Clock: time.Now,
+		TTL:   time.Hour,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	return a
 }

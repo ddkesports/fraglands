@@ -26,11 +26,14 @@ const MaxReplayBytes = 1 << 30
 
 // ReplayStore is the authorized source of replay bytes. The provider never
 // reads files, sockets, or Steam: the store is the only way bytes enter.
+// Every request must carry a replay grant; the store (or its verifying
+// decorator) refuses any request that does not present a valid one, so the
+// provider can never fetch bytes without authorization.
 type ReplayStore interface {
-	// Replay returns a reader over the named replay's bytes. A store that
-	// cannot authorize or find the replay returns an error; the provider
-	// fails the preparation closed on any store error.
-	Replay(ctx context.Context, id string) (io.ReadCloser, error)
+	// Replay returns a reader over the replay named by the request. A store
+	// that cannot authorize the grant or find the replay returns an error;
+	// the provider fails the preparation closed on any store error.
+	Replay(ctx context.Context, req core.ReplayRequest) (io.ReadCloser, error)
 }
 
 // FactsExtractor extracts RunbackFacts from demo bytes at a fixed tick. The
@@ -45,6 +48,7 @@ type IntervalProber func(demo []byte) (float64, error)
 
 // Provider prepares scenarios from stored replays.
 type Provider struct {
+	grants  core.GrantAuthority
 	store   ReplayStore
 	facts   FactsExtractor
 	prober  IntervalProber
@@ -55,17 +59,23 @@ type Provider struct {
 // New constructs a Provider over the store. maxFreshnessTicks is the
 // freshness budget committed to the compiler; zero means no budget was
 // declared, which always yields Preview.
-func New(store ReplayStore, facts FactsExtractor, maxFreshnessTicks uint32) *Provider {
+func New(grants core.GrantAuthority, store ReplayStore, facts FactsExtractor, maxFreshnessTicks uint32) (*Provider, error) {
+	if grants == nil {
+		// Authorization is mandatory: a provider without a grant
+		// authority can never produce an authorized fetch.
+		return nil, ErrGrantAuthorityRequired
+	}
 	if facts == nil {
 		facts = analysis.ExtractRunbackFacts
 	}
 	return &Provider{
+		grants:  grants,
 		store:   store,
 		facts:   facts,
 		prober:  ProveTickInterval,
 		maxAge:  maxFreshnessTicks,
 		maxRead: MaxReplayBytes,
-	}
+	}, nil
 }
 
 // Prepare implements the Preparer seam: it drives one preparation to ready
@@ -97,8 +107,20 @@ func (p *Provider) doPrepare(ctx context.Context, prep *core.ScenarioPreparation
 		return err
 	}
 
-	rc, err := p.store.Replay(ctx, prep.ReplayID)
+	// Authorization precedes every store call: the request carries the
+	// preparation's private grant bound to the preparation ID and replay
+	// ID. A preparation without a grant is refused before the store is
+	// touched, and a store refusal of the grant fails the preparation
+	// closed with the typed grant reason.
+	req := prep.ReplayRequest()
+	if req == nil {
+		return ErrGrantRequired
+	}
+	rc, err := p.store.Replay(ctx, *req)
 	if err != nil {
+		if core.IsGrantRefusal(err) {
+			return err
+		}
 		return fmt.Errorf("%w: %v", ErrStoreDenied, err)
 	}
 	defer rc.Close()

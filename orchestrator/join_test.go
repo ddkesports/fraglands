@@ -57,7 +57,10 @@ func TestIssueJoinIntentAllocationFailure(t *testing.T) {
 
 	owner, _ := testAccounts()
 	sources := []core.ReplaySource{{ID: "replay-1"}}
-	o := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{fail: true}, testIdentityAuthority(), testServerAuthority())
+	o, err := NewOrchestrator(ctx, sources, &mockPreparer{}, &mockAllocator{fail: true}, testIdentityAuthority(), testServerAuthority(), testGrantAuthority())
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 
 	id, err := o.Prepare(owner, "replay-1", 0, 63280)
 	if err != nil {

@@ -28,4 +28,8 @@ var (
 	// ErrUnadmittedAccount is returned when a result is submitted for an
 	// account that never consumed an intent on this process generation.
 	ErrUnadmittedAccount = errors.New("orchestrator: account not admitted on this process generation")
+	// ErrGrantAuthorityRequired is returned when the orchestrator is
+	// constructed without a grant authority. Authorization is mandatory:
+	// without it no preparation could obtain an authorized replay fetch.
+	ErrGrantAuthorityRequired = errors.New("orchestrator: grant authority is required")
 )

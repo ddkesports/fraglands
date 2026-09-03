@@ -66,6 +66,12 @@ type ScenarioPreparation struct {
 	// TakeoverTick is the tick where input unlocks on the same pawn.
 	TakeoverTick uint32
 
+	// grant is the immutable replay authorization grant minted at
+	// acceptance. It is private: no accessor exposes the grant or its token
+	// except ReplayRequest, which exists solely for the provider's
+	// authorized ReplayStore call. It is never serialized by any surface.
+	grant *ReplayGrant
+
 	// bcast guards state, revision, and failure below.
 	bcast broadcast.Broadcast
 	// state is the current lifecycle state.
@@ -77,13 +83,35 @@ type ScenarioPreparation struct {
 }
 
 // NewScenarioPreparation constructs a queued preparation for one replay
-// moment.
-func NewScenarioPreparation(id, replayID string, leadInStartTick, takeoverTick uint32) *ScenarioPreparation {
+// moment, holding the minted replay grant privately. A nil grant is
+// accepted only for callers that never fetch replay bytes (test fakes); the
+// provider refuses to fetch without one.
+func NewScenarioPreparation(id, replayID string, leadInStartTick, takeoverTick uint32, grant *ReplayGrant) *ScenarioPreparation {
 	return &ScenarioPreparation{
 		ID:              id,
 		ReplayID:        replayID,
 		LeadInStartTick: leadInStartTick,
 		TakeoverTick:    takeoverTick,
+		grant:           grant,
+	}
+}
+
+// ReplayRequest builds the authorized request for this preparation's replay
+// bytes: the preparation ID, the replay ID, and the private grant token,
+// bound together. A preparation without a grant yields a nil request: the
+// provider refuses to call the store without authorization.
+func (p *ScenarioPreparation) ReplayRequest() *ReplayRequest {
+	var grant *ReplayGrant
+	p.bcast.HoldLock(func(_ func(), _ func() <-chan struct{}) {
+		grant = p.grant
+	})
+	if grant == nil {
+		return nil
+	}
+	return &ReplayRequest{
+		PreparationID: p.ID,
+		ReplayID:      p.ReplayID,
+		Grant:         grant.Token(),
 	}
 }
 

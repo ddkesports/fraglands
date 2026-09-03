@@ -29,7 +29,7 @@ func TestPreparerAdapterReady(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	a.Prepare(context.Background(), prep)
 
 	if prep.State() != core.PreparationReady {
@@ -59,7 +59,7 @@ func TestPreparerAdapterTypedFailure(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	a.Prepare(context.Background(), prep)
 
 	if prep.State() != core.PreparationFailed {
@@ -97,7 +97,7 @@ func TestPreparerAdapterCompileRefusal(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	a.Prepare(context.Background(), prep)
 
 	if prep.State() != core.PreparationFailed {
@@ -119,7 +119,7 @@ func TestPreparerAdapterRefusesTerminalPreparation(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	if err := prep.MarkFailed(&core.FailureReason{Code: "original", Message: "original failure"}); err != nil {
 		t.Fatal(err.Error())
 	}
@@ -152,7 +152,7 @@ func TestPreparerAdapterCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 100)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 100)
 	a.Prepare(ctx, prep)
 
 	if prep.State() != core.PreparationFailed {

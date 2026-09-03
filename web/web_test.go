@@ -99,12 +99,12 @@ func newTestWeb(t *testing.T) (*httptest.Server, *orchestrator.Orchestrator, *We
 		DisplayName: "Mid Boss Fight",
 		FileName:    "mid-boss.dem",
 	}}
-	orch := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{}, &fakeIdentityAuthority{
+	orch, err := orchestrator.NewOrchestrator(ctx, sources, &fakePreparer{}, &fakeAllocator{}, &fakeIdentityAuthority{
 		accounts: map[string]*core.Account{
 			"cred-a": ownerAccount,
 			"cred-b": otherAcct,
 		},
-	}, &fakeServerAuthority{})
+	}, &fakeServerAuthority{}, testGrantAuthority())
 	console, err := NewWeb(orch)
 	if err != nil {
 		t.Fatal(err.Error())
@@ -752,4 +752,16 @@ func extractInviteToken(t *testing.T, body string) string {
 		return ""
 	}
 	return body[start+len("<code>") : end]
+}
+
+// testGrantAuthority returns a fresh in-memory grant authority for tests.
+func testGrantAuthority() core.GrantAuthority {
+	a, err := core.NewHMACGrantAuthority(core.GrantAuthorityConfig{
+		Clock: time.Now,
+		TTL:   time.Hour,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	return a
 }

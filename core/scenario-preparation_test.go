@@ -10,7 +10,7 @@ func TestScenarioPreparationHappyPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	p := NewScenarioPreparation("prep-1", "replay-1", 0, 63280)
+	p := NewScenarioPreparation("prep-1", "replay-1", 0, 63280, nil)
 	if p.State() != PreparationQueued {
 		t.Fatalf("expected queued, got %s", p.State())
 	}
@@ -50,7 +50,7 @@ func TestScenarioPreparationHappyPath(t *testing.T) {
 }
 
 func TestScenarioPreparationFailures(t *testing.T) {
-	p := NewScenarioPreparation("prep-2", "replay-1", 0, 63280)
+	p := NewScenarioPreparation("prep-2", "replay-1", 0, 63280, nil)
 	if err := p.MarkFailed(&FailureReason{Code: "replay_unsupported", Message: "field kHealth unsupported"}); err != nil {
 		t.Fatal(err.Error())
 	}
@@ -72,7 +72,7 @@ func TestScenarioPreparationFailures(t *testing.T) {
 }
 
 func TestScenarioPreparationCancel(t *testing.T) {
-	p := NewScenarioPreparation("prep-3", "replay-1", 0, 63280)
+	p := NewScenarioPreparation("prep-3", "replay-1", 0, 63280, nil)
 	if err := p.MarkCancelled(); err != nil {
 		t.Fatal(err.Error())
 	}
@@ -85,7 +85,7 @@ func TestScenarioPreparationCancel(t *testing.T) {
 }
 
 func TestScenarioPreparationInvalidTransitions(t *testing.T) {
-	p := NewScenarioPreparation("prep-4", "replay-1", 0, 63280)
+	p := NewScenarioPreparation("prep-4", "replay-1", 0, 63280, nil)
 	if err := p.MarkReady(&ScenarioRevision{ID: "rev-early"}); err == nil {
 		t.Fatal("expected queued to ready refusal")
 	}

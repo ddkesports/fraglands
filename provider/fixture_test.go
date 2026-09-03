@@ -56,9 +56,12 @@ func TestOptInPinnedReplayProvider(t *testing.T) {
 
 	store := newFakeStore()
 	store.add("replay-1", data)
-	p := New(store, nil, 5) // nil facts: production analysis.ExtractRunbackFacts
+	p, err := New(newTestAuthority(), store, nil, 5) // nil facts: production analysis.ExtractRunbackFacts
+	if err != nil {
+		t.Fatal(err.Error())
+	}
 
-	prep := core.NewScenarioPreparation("prep-1", "replay-1", 0, 63280)
+	prep := newAuthorizedPreparation(newTestAuthority(), "prep-1", "replay-1", 63280)
 	if err := p.Prepare(context.Background(), prep); err != nil {
 		t.Fatal(err.Error())
 	}
